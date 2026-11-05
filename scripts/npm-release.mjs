@@ -6,23 +6,18 @@ import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
+import { assertNewerThanPublished, publishedVersions, registry, releaseManifest } from './release-version.mjs';
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
 export const platforms = ['darwin-arm64', 'darwin-x64', 'linux-arm64', 'linux-x64'];
-export const registry = 'https://registry.npmjs.org';
+export { registry };
 const host = () => `${process.platform}-${process.arch}`;
 const capture = (command, args, options = {}) => execFileSync(command, args, {
   encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, timeout: 120_000, ...options,
 });
 
 export function releaseMetadata() {
-  const metadata = JSON.parse(readFileSync(join(root, 'package.json')));
-  const cargo = readFileSync(join(root, 'Cargo.toml'), 'utf8');
-  const version = cargo.match(/^\[package\]\s*\n[\s\S]*?^version\s*=\s*"([^"]+)"/m)?.[1];
-  assert.equal(metadata.name, 'session-finder', 'unexpected npm package name');
-  assert.match(metadata.version, /^\d+\.\d+\.\d+$/, 'release version must be stable semver');
-  assert.equal(metadata.version, version, 'Cargo.toml and package.json versions differ');
-  return metadata;
+  return releaseManifest(root);
 }
 
 export function validateBinary(bytes, target) {
@@ -180,6 +175,7 @@ function publish(archive, otp) {
       console.log(`${metadata.name}@${metadata.version}: identical archive already published`);
       return;
     }
+    assertNewerThanPublished(metadata.version, publishedVersions(metadata.name, cache));
     const args = ['publish', archive, '--access', 'public', '--tag', 'latest', '--registry', registry, '--cache', cache];
     if (otp) args.push('--otp', otp);
     try {

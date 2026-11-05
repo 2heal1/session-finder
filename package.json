@@ -15,6 +15,7 @@
     "test": "node --test scripts/*.test.mjs",
     "check": "sh build.sh check && npm test",
     "bench": "node scripts/benchmark.mjs",
+    "release:version": "node scripts/release-version.mjs",
     "release:pack": "node scripts/npm-release.mjs pack",
     "release:validate": "node scripts/npm-release.mjs validate",
     "release:smoke": "node scripts/npm-release.mjs smoke",

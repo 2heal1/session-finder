@@ -45,7 +45,7 @@ npm run bench
 | Relationships | `src/relations.rs` | Evidence-backed Codex graph traversal |
 | Derived data | `src/cache.rs`, `src/transcript.rs` | Private incremental caches and on-demand TRAE conversation files |
 | Validation | `tests/`, `scripts/*.test.mjs`, `scripts/bench*.mjs`, `bench/budgets.json` | Regression coverage and performance gates |
-| Distribution | `npm/session-finder`, `scripts/npm-release.mjs`, `.github/workflows/` | Native launcher, archive validation, CI, and OIDC release |
+| Distribution | `npm/session-finder`, `scripts/npm-release.mjs`, `scripts/release-version.mjs`, `.github/workflows/` | Native launcher, version selection, archive validation, CI, and OIDC release |
 
 ## Implementation principles
 
@@ -97,4 +97,10 @@ References:
 
 The repository's `package.json` remains `private: true`, and Cargo has `publish = false`. The release script constructs the public npm package. Keep versions synchronized across `package.json`, `Cargo.toml`, and the root package entry in `Cargo.lock`.
 
-Merging a PR runs CI; pushing a matching `vX.Y.Z` tag triggers the release workflow. A manual run defaults to packaging only; publishing requires the matching tag. Use GitHub OIDC through `release.yml`, without long-lived npm tokens. A successful build or trust setup is not proof of a successful npm publication; verify the registry version, archive integrity, and provenance.
+Merging a PR runs CI. To publish, run **Publish npm release** (`publish.yml`) on `main`. Its optional version input accepts stable `X.Y.Z` or `vX.Y.Z`. Blank uses the current manifest version if it is newer than every stable npm version and release tag; otherwise it increments the highest stable patch version. Bootstrap/prerelease versions do not affect that choice.
+
+The release button pins the selected main commit, updates the three version files when needed, and atomically pushes the version commit and tag. It explicitly dispatches `release.yml` on that tag: pushes made with `GITHUB_TOKEN` do not trigger another workflow. Main must permit the workflow's version commit; do not bypass branch rules or force-push to release.
+
+`release.yml` runs full CI and publishes through GitHub OIDC, without long-lived npm tokens. Human-pushed matching tags still trigger it. Direct manual runs of `release.yml` default to packaging only; publishing requires the matching tag. Publication jobs are serialized, and new versions cannot move npm `latest` backwards. Retry a failed release from its original run/tag; the release button reserves existing tags and never moves them.
+
+A successful preparation, build, or trust setup is not proof of a successful npm publication; verify the release workflow result, registry version, archive integrity, and provenance.
