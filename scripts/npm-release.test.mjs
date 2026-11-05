@@ -4,7 +4,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
-import { pack, platforms, publicationState, releaseMetadata, validateArchive, validateBinary } from './npm-release.mjs';
+import { pack, platforms, publicationState, releaseMetadata, validateArchive, validateBinary, verifyPublishedIntegrity } from './npm-release.mjs';
 
 function header(target) {
   const bytes = Buffer.alloc(64);
@@ -51,6 +51,72 @@ test('publish retries skip only byte-identical existing releases', () => {
   assert.throws(() => publicationState({ status: 1, stdout: '{"error":{"code":"E401"}}', stderr: 'unauthorized' }), /Registry lookup failed/);
   assert.throws(() => publicationState({ status: 1, stdout: '', stderr: 'network error' }), /network error/);
   assert.throws(() => publicationState({ error: new Error('timeout') }), /timeout/);
+});
+
+function verificationClock() {
+  let elapsed = 0;
+  const waits = [];
+  return {
+    waits,
+    options: {
+      timeoutMs: 25, intervalMs: 10, now: () => elapsed,
+      wait: async ms => { waits.push(ms); elapsed += ms; },
+      log: () => {},
+    },
+  };
+}
+
+test('publication verification tolerates npm processing before checking exact integrity', async () => {
+  const clock = verificationClock();
+  const responses = [
+    { status: 1, stdout: '{"error":{"code":"E404"}}' },
+    { status: 1, stdout: '{"error":{"code":"E404"}}' },
+    { status: 0, stdout: '"sha512-example"' },
+  ];
+  const budgets = [];
+  await verifyPublishedIntegrity(remaining => {
+    budgets.push(remaining);
+    return responses.shift();
+  }, 'sha512-example', clock.options);
+  assert.equal(responses.length, 0);
+  assert.deepEqual(clock.waits, [10, 10]);
+  assert.deepEqual(budgets, [25, 15, 5]);
+});
+
+test('publication verification checks immediately and does not delay an available version', async () => {
+  const clock = verificationClock();
+  await verifyPublishedIntegrity(() => ({ status: 0, stdout: '"sha512-example"' }), 'sha512-example', clock.options);
+  assert.deepEqual(clock.waits, []);
+});
+
+test('publication verification stops at its deadline and explains accepted but unverified publication', async () => {
+  const clock = verificationClock();
+  let lookups = 0;
+  await assert.rejects(verifyPublishedIntegrity(() => {
+    lookups++;
+    return { status: 1, stdout: '{"error":{"code":"E404"}}' };
+  }, 'sha512-example', clock.options), /npm accepted publication.*timed out.*Do not republish/);
+  assert.equal(lookups, 3);
+  assert.deepEqual(clock.waits, [10, 10, 5]);
+});
+
+test('publication verification never retries integrity, authentication or network failures', async () => {
+  for (const result of [
+    { status: 0, stdout: '"different"' },
+    { status: 1, stdout: '{"error":{"code":"E401"}}', stderr: 'unauthorized' },
+    { status: 1, stdout: '{"error":{"code":"E403"}}', stderr: 'forbidden' },
+    { status: 1, stdout: '', stderr: 'network failure' },
+    { error: new Error('timeout') },
+  ]) {
+    const clock = verificationClock();
+    let lookups = 0;
+    await assert.rejects(verifyPublishedIntegrity(() => {
+      lookups++;
+      return result;
+    }, 'sha512-example', clock.options));
+    assert.equal(lookups, 1);
+    assert.deepEqual(clock.waits, []);
+  }
 });
 
 test('archive validation rejects a private smoke package and unexpected files', () => {
