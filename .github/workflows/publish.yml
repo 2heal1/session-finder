@@ -1,0 +1,80 @@
+name: Publish npm release
+run-name: Publish npm release (${{ inputs.version || 'automatic version' }})
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Optional X.Y.Z (or vX.Y.Z); blank uses the next available version'
+        type: string
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+
+concurrency:
+  group: session-finder-prepare-release
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    if: github.repository == '2heal1/session-finder'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: write
+      actions: write
+    steps:
+      - name: Require main
+        env:
+          SELECTED_REF: ${{ github.ref }}
+        run: |
+          if [ "$SELECTED_REF" != refs/heads/main ]; then
+            echo '::error::Select main to publish a new release.'
+            exit 1
+          fi
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24.18.1
+          package-manager-cache: false
+      - name: Infer version, synchronize manifests, and push release tag
+        id: version
+        env:
+          REQUESTED_VERSION: ${{ inputs.version }}
+          GIT_AUTHOR_NAME: github-actions[bot]
+          GIT_AUTHOR_EMAIL: 41898282+github-actions[bot]@users.noreply.github.com
+          GIT_COMMITTER_NAME: github-actions[bot]
+          GIT_COMMITTER_EMAIL: 41898282+github-actions[bot]@users.noreply.github.com
+        run: node scripts/release-version.mjs --prepare
+      - name: Record prepared release
+        env:
+          RELEASE_VERSION: ${{ steps.version.outputs.version }}
+          RELEASE_TAG: ${{ steps.version.outputs.tag }}
+          RELEASE_SHA: ${{ steps.version.outputs.sha }}
+        run: |
+          {
+            echo "Prepared **$RELEASE_TAG** at \`$RELEASE_SHA\`."
+            echo
+            echo "Build and npm publication run in [Release session-finder](https://github.com/$GITHUB_REPOSITORY/actions/workflows/release.yml)."
+            echo
+            echo "If dispatch fails, run that workflow on tag \`$RELEASE_TAG\`, version \`$RELEASE_VERSION\`, with publish enabled. Keep the existing tag."
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Start full release from the exact tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_VERSION: ${{ steps.version.outputs.version }}
+          RELEASE_TAG: ${{ steps.version.outputs.tag }}
+        # Tags pushed with GITHUB_TOKEN do not trigger push workflows.
+        # workflow_dispatch does, and keeps OIDC in the trusted release.yml.
+        run: |
+          gh workflow run release.yml \
+            --repo "$GITHUB_REPOSITORY" \
+            --ref "$RELEASE_TAG" \
+            -f "version=$RELEASE_VERSION" \
+            -f publish=true
+          echo 'Release workflow dispatched. Check its result to confirm publication.' >> "$GITHUB_STEP_SUMMARY"

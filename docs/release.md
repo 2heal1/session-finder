@@ -26,7 +26,44 @@ Windows and Alpine/musl are unsupported. Builds use Rust 1.97.1; CI scripts use 
 
 Artifacts are `native-*`, `performance-report`, and `npm-package`. Temporary single-platform packages have `private: true` and are rejected by the publish script. A public archive missing any platform is rejected.
 
-**Merging a PR does not publish.** Pushing a matching `vX.Y.Z` tag triggers a full build and npm publication. A manual release run defaults to `publish=false`; `publish=true` requires selecting the matching version tag. A manual run on a branch can only validate/build.
+**Merging a PR does not publish.** Use the [Publish npm release](../.github/workflows/publish.yml) button to prepare a version and start the full release. Human-pushed matching `vX.Y.Z` tags also trigger a full build and npm publication.
+
+## Click to publish
+
+After these workflows are merged into `main`:
+
+1. Open the repository's **Actions → Publish npm release → Run workflow**.
+2. Select **main**. Leave **version** blank for automatic selection, or enter an exact stable version such as `0.2.0` (a `v` prefix is also accepted).
+3. Click **Run workflow**. The workflow synchronizes the three version files, creates a version commit if needed, pushes the tag, and starts **Release session-finder**.
+4. Follow **Release session-finder** to completion. It runs the complete CI pipeline and publishes the validated four-platform archive under npm `latest`. The preparation run's summary links to this workflow; a green preparation run only confirms preparation and dispatch.
+
+Automatic selection compares the repository version, all stable npm versions, and existing `vX.Y.Z` tags. If the repository version is newer than every published/tagged version, it uses that version. Otherwise it increments the highest stable patch: `0.1.0 → 0.1.1`, for example. With only the current bootstrap versions on npm and no stable tags, the first release is **0.1.0**. Bootstrap and other prerelease versions are ignored.
+
+An explicit version must be at least the repository version and newer than every stable npm version and release tag. This allows intentional minor/major releases while rejecting duplicates and downgrades. Prerelease versions and build metadata are not supported.
+
+To preview selection locally without changing files, tags, or the registry:
+
+```sh
+npm run release:version
+npm run release:version -- --version 0.2.0
+```
+
+The button uses the main commit selected when the run was started. If main moves before preparation, start a fresh run from main. Version preparation is serialized; main and the tag are pushed atomically, so a concurrent branch update or tag collision cannot leave a partial remote update. The workflow uses its built-in GitHub token with `contents: write` and `actions: write`. Main must permit the workflow's version commit; branch rules that block it will stop preparation.
+
+The tag push does not itself start another workflow because it uses `GITHUB_TOKEN`. Preparation explicitly dispatches **release.yml** on the exact tag, preserving the existing npm trusted publisher and release provenance. A version commit made by this token also does not trigger the normal main-push CI; the dispatched release runs the complete CI pipeline for it.
+
+## Retry or validate without publishing
+
+For a failed build or publication, rerun the failed jobs in the original **Release session-finder** run. If preparation pushed a tag but dispatch failed, open **Release session-finder → Run workflow**, select that tag, enter its exact `X.Y.Z` version, and enable **publish**. The same recovery can be started with:
+
+```sh
+gh workflow run release.yml --repo 2heal1/session-finder \
+  --ref v0.1.0 -f version=0.1.0 -f publish=true
+```
+
+Use the prepared version in place of `0.1.0`. Keep the existing tag and release commit. The release button treats tags as reserved: a blank new run selects the next available version, and an explicit existing version is rejected.
+
+For packaging-only validation, run **Release session-finder** directly with the exact manifest version and leave **publish** disabled (its default). A direct run on a branch can only validate/build; publication requires the matching tag.
 
 ## Local checks
 
@@ -74,26 +111,23 @@ npm trust github session-finder \
 
 Local bootstrap publication and trust configuration may require separate npm two-factor challenges. Complete authentication when the operation requests it. Use an OTP only for that operation; do not store it in files, logs, or GitHub secrets. An authorized existing browser profile can be used for browser authentication.
 
-## First full release and later versions
+## Verify publication
 
-1. Update the three version locations when needed, run checks, and merge the release-ready changes.
-2. Wait for the merged commit's CI. Download its `npm-package` artifact and validate/install it against the corresponding source revision.
-3. Push the matching tag for the intended release commit. For the first `0.1.0` release, after verifying that `origin/main` is that commit:
+After **Release session-finder** succeeds, query the published version (substitute the selected version):
 
 ```sh
-git fetch origin main
-git tag v0.1.0 origin/main
-git push origin v0.1.0
+npm view session-finder@0.1.0 version dist.integrity dist.attestations --json \
+  --registry=https://registry.npmjs.org
+npm view session-finder dist-tags --json --registry=https://registry.npmjs.org
 ```
 
-4. Inspect the `Release session-finder` run. It rebuilds and validates all four platforms before publishing the resulting archive to npm under `latest`.
-5. Verify `npm view session-finder@0.1.0 version dist.integrity --json --registry=https://registry.npmjs.org`, compare the integrity with the published artifact, and verify npm provenance.
+Compare registry integrity with the `.integrity` file in that run's `npm-package` artifact, confirm the expected `latest` version, and inspect npm provenance.
 
 Only successful publication and registry verification establish that OIDC works end to end. A placeholder, trust configuration, dry run, or successful package build does not establish that.
 
 The publish job uses a GitHub-hosted runner and is the only job granted `id-token: write`. Do not configure `NPM_TOKEN` or `NODE_AUTH_TOKEN` for this workflow. Public packages published through supported GitHub trusted publishing receive npm provenance automatically.
 
-The publish script validates and installs the archive before checking the target version. It skips an existing version only if `dist.integrity` matches exactly; different content requires a new version. Registry network/authentication errors are not treated as a missing version. After publication it checks registry integrity again.
+The publish script validates and installs the archive before checking the target version. It skips an existing version only if `dist.integrity` matches exactly; different content requires a new version. Registry network/authentication errors are not treated as a missing version. Publication jobs are serialized across versions, and immediately before publishing a new version the script requires it to be newer than every stable npm version. An older build finishing later therefore cannot move `latest` backwards. After publication it checks registry integrity again.
 
 If npm accepts a publication but the subsequent registry check fails during propagation, inspect the registry before retrying; the version may already exist. Recover a workflow publication from its matching tag, preserving the exact archive identity.
 
