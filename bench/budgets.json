@@ -1,0 +1,11 @@
+{
+  "fixtureVersion": 1,
+  "sessions": 1200,
+  "turns": 16,
+  "runs": 7,
+  "maxRegressionRatio": 1.25,
+  "minRegressionMs": 10,
+  "coldWallMs": 1500,
+  "warmWallMs": 750,
+  "timeoutMs": 15000
+}
