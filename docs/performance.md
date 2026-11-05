@@ -1,8 +1,29 @@
-# 性能回归检查
+# Performance
 
-`bench/budgets.json` 是性能门槛，CI 和本地共用。基准数据全部现场生成，显式使用 `--provider codex` 和临时 `--home`，不访问真实 Codex、TRAE IDE 或 TRAE CLI 数据。当前数据集有 1,200 个会话、每个 16 条消息、24 个项目，包含 zstd 压缩、归档、fork、spawn、SQLite 元数据和标题索引。
+session-finder uses a native Rust executable, incremental SQLite/zstd indexes, and selective reads to keep repeated local queries quick. Performance checks validate returned data and read counts as well as elapsed time.
 
-## 运行
+## Measured results
+
+The following results come from [CI run 41993442270](https://github.com/2heal1/session-finder/actions/runs/41993442270), commit `ea6da5488b28b5e9673e2ad8ca2201422b2a1974`, on November 5, 2026. The runner was GitHub-hosted Ubuntu 24.04, Linux x64, using Rust 1.97.1 and Node.js 24.18.1. The `performance-report` artifact contains the raw samples and environment metadata.
+
+The dataset contains **1,200 synthetic Codex sessions**, 16 messages per session, and 24 projects, including compressed/archived logs, forks, subagents, SQLite metadata, and a title index. After default subagent filtering, 1,130 sessions are visible; project-scoped cases select 47.
+
+| Scenario | Empty tool cache | Warm tool cache |
+| --- | ---: | ---: |
+| Newest 10 sessions by creation time | 31.7 ms | 26.2 ms |
+| Recent sessions by latest reply | 113.4 ms | 53.1 ms |
+| Recent sessions in one project | 34.4 ms | 27.4 ms |
+| Text search in one project | 46.1 ms | 33.2 ms |
+| Fuzzy search in one project | 51.5 ms | 38.6 ms |
+| Project list | 113.5 ms | 53.5 ms |
+| Read one conversation | 13.4 ms | 13.3 ms |
+| Discover relationships to depth 3 | 43.6 ms | 28.3 ms |
+
+Values are median wall-clock times over seven runs, including process startup and JSON output. List cases request full metadata with `--verbose`. The fuzzy query is `modren fedration`, scoped to `project-03`. These measurements do not measure all-provider searches or promise equivalent performance for TRAE IDE/CLI.
+
+An empty tool cache means a fresh session-finder cache directory, not a cleared OS file cache. The executable and OS pages are preheated before sampling. `show` deliberately rereads its selected transcript in both modes. The base commit for this run predates the Rust implementation, so it passed absolute-time and operation gates without a relative Rust baseline comparison.
+
+## Reproduce
 
 ```sh
 sh build.sh check
@@ -10,28 +31,47 @@ npm test
 sh build.sh
 npm run bench
 
-# 修改代码前保存一份 release 二进制，比较同机的两个版本
+# Before changing the implementation, save a release build.
 cp session-finder /tmp/session-finder-baseline
-# 修改、重新构建后：
+# Make the change and rebuild, then compare on the same machine.
 npm run bench -- --baseline /tmp/session-finder-baseline
 ```
 
-需要 Node.js 24（使用内置 SQLite 和 zstd），无 npm 依赖。`--binary` 指定当前二进制，`--output` 指定报告目录，`--runs` 可调整本地采样次数（3–31）。CI 固定使用配置中的 7 次采样。
+Node.js 24 is required for built-in SQLite and zstd support; no npm dependencies are needed. `--binary` selects the candidate, `--output` selects the report directory, and `--runs` accepts 3–31 local samples. CI uses the configured seven runs.
 
-报告默认输出到 `bench-results/report.json` 和 `report.md`。JSON 保存环境、每次墙钟时间、查询时间、读取计数及结果摘要，Markdown 适合快速比较。CI 将报告写入 Summary 并上传 `performance-report` artifact，即使检查失败也保留已产生的数据。
+Fixtures are generated in a temporary directory. Benchmarks explicitly select `--provider codex` and a temporary `--home`; they do not inspect real Codex, TRAE IDE, or TRAE CLI history.
 
-## 门槛
+Reports default to `bench-results/report.json` and `report.md`. JSON includes environment details, samples, query times, read counters, and result digests. CI writes Markdown to its job summary and uploads `performance-report`, including reports produced before a failure.
 
-- 每项使用 7 次采样的中位数；基线和当前版本交替运行，同机、同数据、独立缓存。
-- 中位墙钟时间同时超过基线 **25%** 且增加 **10 ms** 以上，判定退化。
-- 冷缓存上限 **1,500 ms**，热缓存上限 **750 ms**；单次进程超时 **15 s**。
-- 每次执行检查正文读取、元数据读取和缓存命中计数；任何不符都失败。创建时间列表冷缓存只读 10 条正文，关系查询只读日志头；热缓存不重读正文或日志头。`show` 本身按需读正文，不使用摘要缓存，单独允许读取 1 条。
-- 验证匹配总数、show 消息数、关系边数，跨样本及两个版本比较查询结果。避免通过少返回数据获得虚假的提速。
+## Regression gates
 
-比较旧版二进制时，为旧 Codex 会话结果补齐新增字段的默认值 `provider=codex`、`scope=local_conversation`。支持列表版本 2 的二进制在基准中使用 `--json --verbose`，继续校验全部元数据；跨版本只忽略新增 `matches` 并统一列表版本号。当前二进制的冷/热结果仍比较包括片段在内的完整输出。该基准衡量完整元数据输出的耗时，默认精简 JSON 的体积需另行测量。
+The shared configuration is [`bench/budgets.json`](../bench/budgets.json).
 
-“冷缓存”指 session-finder 的空缓存，不是清空 OS 文件缓存。先预热可执行程序和 OS 页面，再对每轮使用新的工具缓存目录。墙钟时间包含 CLI 启动及 JSON 输出；`stats.elapsedMs` 只包含查询及工具缓存处理。终端中的 `耗时` 同样是查询时间，不包含等待交互输入。
+| Gate | Rule |
+| --- | --- |
+| Relative wall time | Fail when the median exceeds the baseline by both 25% and 10 ms |
+| Empty-cache wall time | At most 1,500 ms |
+| Warm-cache wall time | At most 750 ms |
+| Individual process timeout | 15 seconds |
+| Source reads | Match each scenario's expected body/header/cache counts |
+| Results | Preserve expected totals, messages, relationships, ordering, and content |
 
-PR 使用目标分支 base SHA，main push 使用前一个 SHA。基线用相同 Rust 工具链构建。如果最初的基线提交还没有 `Cargo.toml`，CI 会明确标为 bootstrap，仅执行绝对耗时和读取计数门槛；已有 Rust 基线的构建失败会直接失败，不会静默跳过。release tag 的比较基线在无 before SHA 时使用父提交。
+Baseline and candidate runs alternate on the same machine, dataset, and separate caches. Creation-order pages read only their 10 displayed bodies on a cold run. Relationship queries scan headers without building a body index. Warm cases do not reread bodies or headers, except `show`, which is allowed to read one body.
 
-预算变化需要连同原因和报告一起评审。若查询语义有意变化，应更新合成数据预期，并明确评估基线结果差异。CI 能报告失败；要阻止带失败检查的 PR 合并，仓库管理员还需在分支规则中将 `Tests and performance` 及 `Validate npm package` 设为必需检查。
+Cross-version comparison fills missing legacy Codex fields with `provider=codex` and `scope=local_conversation`. For list-schema compatibility it normalizes the list version and excludes newly introduced `matches` only in cross-version digests. Cold/warm comparisons of the current binary still include the full output and snippets. This benchmark measures full metadata output; compact JSON output size needs a separate measurement.
+
+Wall time includes launching the process and serializing JSON. `stats.elapsedMs` measures query/cache work. Terminal timing likewise excludes process startup and interactive waiting.
+
+PRs compare against the target branch's base SHA; main pushes use the preceding SHA. Release tags fall back to the parent commit when no usable previous SHA exists. A base without `Cargo.toml` is explicitly reported as bootstrap. A Rust baseline that fails to build is an error, not a reason to skip comparison.
+
+Review budget changes with a rationale and report. Intentional query changes must update synthetic expectations and explain any baseline difference. Repository branch rules must require `Tests and performance` and `Validate npm package` if failing checks should block a merge.
+
+## Implementation choices
+
+- Summary records and compressed full-text records are stored separately. Ordinary recent-session queries do not load the full-text index.
+- Codex creation-order queries filter/sort metadata before reading the displayed page. Project searches select candidate projects before reading full text. A cold latest-reply query still reads the relevant bodies to establish real reply times.
+- At most four parsing workers process candidate logs. Normalized search text and cleaned original messages are cached together; snippets are generated only for the returned page without rereading logs.
+- File device/inode, size, nanosecond modification time, and relevant database metadata participate in invalidation. Titles and project metadata refresh independently; removed logs stop appearing.
+- SQLite transactions and WAL support concurrent CLI processes. Changing source fingerprints prevent an unstable read from being cached. Cache failures fall back to source data with warnings.
+
+TRAE providers have different source costs. Native IDE indexing tracks database/WAL changes and per-conversation revisions. TRAE CLI cold queries currently read logs within the selected ID scope before shared project/pagination filtering. See the [IDE](trae.md) and [CLI](traecli.md) guides before changing their performance paths.
