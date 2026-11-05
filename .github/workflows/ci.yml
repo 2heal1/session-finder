@@ -1,0 +1,178 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_call:
+    inputs:
+      baseline-ref:
+        type: string
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: Tests and performance
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24.18.1
+          package-manager-cache: false
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.97.1
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Rust checks and regression tests
+        run: sh build.sh check
+      - name: Performance and publishing guard tests
+        run: npm test
+      - name: Build candidate
+        run: sh build.sh
+      - name: Build comparison baseline
+        id: base
+        env:
+          BASE_REF: ${{ inputs.baseline-ref || github.event.pull_request.base.sha || github.event.before }}
+          RUSTUP_TOOLCHAIN: 1.97.1
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -z "$BASE_REF" || "$BASE_REF" =~ ^0+$ ]]; then
+            BASE_REF=$(git rev-parse --verify HEAD^ 2>/dev/null || true)
+          fi
+          if [[ -z "$BASE_REF" ]]; then
+            echo 'reason=Bootstrap: no parent commit; absolute and operation gates remain active' >> "$GITHUB_OUTPUT"
+          else
+            git cat-file -e "$BASE_REF^{commit}"
+            if git cat-file -e "$BASE_REF:Cargo.toml" 2>/dev/null; then
+              mkdir -p "$RUNNER_TEMP/perf-base"
+              git archive "$BASE_REF" | tar -x -C "$RUNNER_TEMP/perf-base"
+              cargo build --locked --release --manifest-path "$RUNNER_TEMP/perf-base/Cargo.toml" --target-dir "$RUNNER_TEMP/perf-base-target"
+              echo "binary=$RUNNER_TEMP/perf-base-target/release/session-finder" >> "$GITHUB_OUTPUT"
+            else
+              echo 'reason=Bootstrap: baseline predates the Rust implementation; absolute and operation gates remain active' >> "$GITHUB_OUTPUT"
+            fi
+          fi
+      - name: Enforce performance budgets
+        env:
+          BASELINE_BINARY: ${{ steps.base.outputs.binary }}
+          BOOTSTRAP_REASON: ${{ steps.base.outputs.reason }}
+        shell: bash
+        run: |
+          args=(--binary ./session-finder --output bench-results)
+          if [[ -n "$BASELINE_BINARY" ]]; then
+            args+=(--baseline "$BASELINE_BINARY")
+          else
+            args+=(--bootstrap-reason "$BOOTSTRAP_REASON")
+          fi
+          node scripts/benchmark.mjs "${args[@]}"
+      - name: Performance summary
+        if: always()
+        run: |
+          if [ -f bench-results/report.md ]; then
+            cat bench-results/report.md >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: performance-report
+          path: bench-results/
+          if-no-files-found: ignore
+
+  native:
+    name: Native / ${{ matrix.platform }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: darwin-arm64
+            runner: macos-15
+            triple: aarch64-apple-darwin
+          - platform: darwin-x64
+            runner: macos-15-intel
+            triple: x86_64-apple-darwin
+          - platform: linux-arm64
+            runner: ubuntu-22.04-arm
+            triple: aarch64-unknown-linux-gnu
+          - platform: linux-x64
+            runner: ubuntu-22.04
+            triple: x86_64-unknown-linux-gnu
+    env:
+      MACOSX_DEPLOYMENT_TARGET: '13.0'
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24.18.1
+          package-manager-cache: false
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.97.1
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.platform }}
+      - name: Check native toolchain
+        env:
+          EXPECTED_HOST: ${{ matrix.triple }}
+        run: |
+          rustc -vV | grep -Fx "host: $EXPECTED_HOST"
+      - name: Test and build native executable
+        run: |
+          sh build.sh check
+          sh build.sh
+      - name: Prepare platform package
+        env:
+          PLATFORM: ${{ matrix.platform }}
+        run: |
+          mkdir -p "dist/native/$PLATFORM"
+          cp session-finder "dist/native/$PLATFORM/session-finder"
+          npm run release:pack -- --local --binaries dist/native --output dist/smoke
+      - name: Verify installed command
+        run: |
+          version=$(node -p "require('./package.json').version")
+          npm run release:smoke -- --local --archive "dist/smoke/session-finder-$version.tgz"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: native-${{ matrix.platform }}
+          path: dist/native/
+          if-no-files-found: error
+
+  package:
+    name: Validate npm package
+    needs: [verify, native]
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24.18.1
+          package-manager-cache: false
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: native-*
+          path: dist/native
+          merge-multiple: true
+      - name: Pack and inspect all four platforms
+        run: npm run release:pack -- --binaries dist/native --output dist/npm
+      - name: Install final archive and run CLI
+        run: |
+          version=$(node -p "require('./package.json').version")
+          npm run release:smoke -- --archive "dist/npm/session-finder-$version.tgz"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: npm-package
+          path: dist/npm/
+          if-no-files-found: error

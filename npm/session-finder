@@ -1,0 +1,32 @@
+#!/bin/sh
+set -eu
+
+# npm's global bin and node_modules/.bin are symlinks. Resolve relative links too.
+script=$0
+while [ -L "$script" ]; do
+  parent=$(dirname "$script")
+  link=$(readlink "$script")
+  case "$link" in
+    /*) script=$link ;;
+    *) script=$parent/$link ;;
+  esac
+done
+package_dir=$(CDPATH= cd -P "$(dirname "$script")/.." && pwd)
+platform=$(uname -s)
+arch=$(uname -m)
+case "$platform:$arch" in
+  Darwin:arm64) target=darwin-arm64 ;;
+  Darwin:x86_64) target=darwin-x64 ;;
+  Linux:aarch64|Linux:arm64) target=linux-arm64 ;;
+  Linux:x86_64|Linux:amd64) target=linux-x64 ;;
+  *)
+    printf 'session-finder: unsupported platform %s/%s (macOS and Linux, arm64/x64 only)\n' "$platform" "$arch" >&2
+    exit 1
+    ;;
+esac
+binary=$package_dir/native/$target/session-finder
+if [ ! -x "$binary" ]; then
+  printf 'session-finder: native executable missing for %s; reinstall the package\n' "$target" >&2
+  exit 1
+fi
+exec "$binary" "$@"

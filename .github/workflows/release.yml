@@ -1,0 +1,83 @@
+name: Release session-finder
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Exact version from package.json and Cargo.toml
+        type: string
+        required: true
+      publish:
+        description: Publish to npm (requires selecting the matching vX.Y.Z tag)
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: session-finder-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  preflight:
+    if: github.repository == '2heal1/session-finder'
+    runs-on: ubuntu-24.04
+    outputs:
+      publish: ${{ steps.release.outputs.publish }}
+      version: ${{ steps.release.outputs.version }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24.18.1
+          package-manager-cache: false
+      - name: Validate release version and tag
+        id: release
+        env:
+          REQUESTED_VERSION: ${{ inputs.version }}
+          SHOULD_PUBLISH: ${{ github.event_name == 'push' || inputs.publish }}
+        run: |
+          node --input-type=module <<'NODE'
+          import assert from 'node:assert/strict';
+          import { appendFileSync } from 'node:fs';
+          import { releaseMetadata } from './scripts/npm-release.mjs';
+          const { version } = releaseMetadata();
+          if (process.env.REQUESTED_VERSION) assert.equal(process.env.REQUESTED_VERSION, version);
+          if (process.env.SHOULD_PUBLISH === 'true' || process.env.GITHUB_REF_TYPE === 'tag') {
+            assert.equal(process.env.GITHUB_REF, `refs/tags/v${version}`, 'Select the matching release tag');
+          }
+          appendFileSync(process.env.GITHUB_OUTPUT, `version=${version}\npublish=${process.env.SHOULD_PUBLISH}\n`);
+          NODE
+
+  build:
+    needs: preflight
+    uses: ./.github/workflows/ci.yml
+
+  publish:
+    needs: [preflight, build]
+    if: needs.preflight.outputs.publish == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24.18.1
+          registry-url: https://registry.npmjs.org
+          package-manager-cache: false
+      - name: Use OIDC-capable npm
+        run: npm install --global npm@11.16.0
+      - uses: actions/download-artifact@v4
+        with:
+          name: npm-package
+          path: dist/npm
+      - name: Publish validated archive through npm trusted publishing
+        env:
+          RELEASE_VERSION: ${{ needs.preflight.outputs.version }}
+        run: npm run release:publish -- --archive "dist/npm/session-finder-$RELEASE_VERSION.tgz"

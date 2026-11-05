@@ -1,0 +1,7 @@
+/target/
+/session-finder
+.DS_Store
+/node_modules/
+/dist/
+/bench-results/
+*.tgz

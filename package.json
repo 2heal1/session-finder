@@ -1,0 +1,23 @@
+{
+  "name": "session-finder",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Fast, local Codex session search, relationships and terminal browser",
+  "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/2heal1/session-finder.git"
+  },
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "test": "node --test scripts/*.test.mjs",
+    "check": "sh build.sh check && npm test",
+    "bench": "node scripts/benchmark.mjs",
+    "release:pack": "node scripts/npm-release.mjs pack",
+    "release:validate": "node scripts/npm-release.mjs validate",
+    "release:smoke": "node scripts/npm-release.mjs smoke",
+    "release:publish": "node scripts/npm-release.mjs publish"
+  }
+}
