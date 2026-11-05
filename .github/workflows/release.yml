@@ -60,7 +60,7 @@ jobs:
     needs: [preflight, build]
     if: needs.preflight.outputs.publish == 'true'
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
+    timeout-minutes: 20
     concurrency:
       group: session-finder-npm-publish
       cancel-in-progress: false

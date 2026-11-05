@@ -4,6 +4,7 @@ import { createHash } from 'node:crypto';
 import { chmodSync, copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
+import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 import { assertNewerThanPublished, publishedVersions, registry, releaseManifest } from './release-version.mjs';
@@ -162,16 +163,32 @@ export function publicationState(result, integrity) {
   throw new Error(`Registry lookup failed: ${result.stderr || result.stdout}`);
 }
 
-function publish(archive, otp) {
+export async function verifyPublishedIntegrity(lookup, integrity, {
+  timeoutMs = 600_000, intervalMs = 10_000, now = Date.now, wait = delay, log = console.log,
+} = {}) {
+  const deadline = now() + timeoutMs;
+  while (now() < deadline) {
+    const result = await lookup(deadline - now());
+    if (publicationState(result, integrity) === 'published') return;
+    const remaining = deadline - now();
+    if (remaining <= 0) break;
+    log(`npm accepted publication; waiting for registry availability (${Math.ceil(remaining / 1000)}s remaining)`);
+    await wait(Math.min(intervalMs, remaining));
+  }
+  throw new Error('npm accepted publication, but registry verification timed out. Do not republish; verify the registry archive before rerunning the failed publish job.');
+}
+
+async function publish(archive, otp) {
   const metadata = validateArchive(archive);
   smoke(archive);
   const integrity = `sha512-${createHash('sha512').update(readFileSync(archive)).digest('base64')}`;
   const cache = mkdtempSync(join(tmpdir(), 'session-finder-publish-'));
   try {
-    const result = spawnSync('npm', [
-      'view', `${metadata.name}@${metadata.version}`, 'dist.integrity', '--json', '--registry', registry, '--cache', cache,
-    ], { encoding: 'utf8', timeout: 60_000 });
-    if (publicationState(result, integrity) === 'published') {
+    const lookup = (timeoutMs = 60_000) => spawnSync('npm', [
+      'view', `${metadata.name}@${metadata.version}`, 'dist.integrity', '--json',
+      '--registry', registry, '--cache', cache, '--prefer-online',
+    ], { encoding: 'utf8', timeout: Math.max(1, Math.min(60_000, timeoutMs)) });
+    if (publicationState(lookup(), integrity) === 'published') {
       console.log(`${metadata.name}@${metadata.version}: identical archive already published`);
       return;
     }
@@ -184,8 +201,9 @@ function publish(archive, otp) {
       // Node's default child_process error includes spawnargs (and possibly OTP).
       throw new Error(`npm publish failed (exit ${error.status ?? 'unknown'}); see npm output above`);
     }
-    const published = capture('npm', ['view', `${metadata.name}@${metadata.version}`, 'dist.integrity', '--json', '--registry', registry, '--cache', cache]);
-    assert.equal(JSON.parse(published), integrity, 'published archive integrity mismatch');
+    // npm may acknowledge a publication before its version metadata is visible.
+    // Retry only the read-only verification, never the publish command.
+    await verifyPublishedIntegrity(lookup, integrity);
   } finally {
     rmSync(cache, { recursive: true, force: true });
   }
@@ -208,7 +226,7 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
     else if (command === 'smoke') smoke(archive, values);
     else if (command === 'publish') {
       assert.equal(values.local, false, '--local cannot be published');
-      publish(archive, values.otp);
+      await publish(archive, values.otp);
     } else throw new Error(`Unknown command: ${command}`);
     console.log(`${command}: OK`);
   }
