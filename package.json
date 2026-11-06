@@ -1,6 +1,6 @@
 {
   "name": "session-finder",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "private": true,
   "description": "Fast, local Codex session search, relationships and terminal browser",
   "type": "module",
