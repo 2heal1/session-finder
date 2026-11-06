@@ -145,7 +145,7 @@ export function smoke(archive, { local = false } = {}) {
     assert.equal(data.total, 1);
     assert.equal(data.sessions[0].id, id);
     assert.deepEqual(data.warnings, []);
-    assert.match(result.stderr, /耗时 \d+ ms/);
+    assert.match(result.stderr, /Elapsed \d+ ms/);
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }
