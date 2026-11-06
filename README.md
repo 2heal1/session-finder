@@ -31,7 +31,16 @@ Searches include all three by default. Use `--provider codex`, `--provider trae`
 
 ## Install
 
-The first installable npm release is being prepared. The current npm version is a bootstrap placeholder and does not contain the CLI. For now, build from source with Rust and a native C toolchain:
+Install globally with npm, then run `session-finder` from any directory:
+
+```sh
+npm install -g session-finder
+session-finder --help
+```
+
+Supported release targets are **macOS 13+** and **Linux with glibc 2.35+**, each on **arm64 and x64**. Windows and Alpine/musl are not supported. The installed CLI runs as a native executable without a Node.js runtime.
+
+Alternatively, build from source with Rust and a native C toolchain:
 
 ```sh
 git clone https://github.com/2heal1/session-finder.git
@@ -40,31 +49,31 @@ sh build.sh
 ./session-finder --help
 ```
 
-Supported release targets are **macOS 13+** and **Linux with glibc 2.35+**, each on **arm64 and x64**. Windows and Alpine/musl are not supported. Once the first CLI release is published, it will be available with `npm install -g session-finder`.
+When using a source build, run `./session-finder` from the repository directory in place of `session-finder` in the examples below.
 
 ## Find a conversation
 
-Run `./session-finder` in a terminal to open the interactive browser. Use arrow keys to navigate, Enter to select, and Esc to go back.
+Run `session-finder` in a terminal to open the interactive browser. Use arrow keys to navigate, Enter to select, and Esc to go back.
 
 ```sh
 # Recent conversations across all supported agents
-./session-finder recent
+session-finder recent
 
 # Search titles and messages; typos are supported
-./session-finder search "modren federation" --sort relevance
+session-finder search "modren federation" --sort relevance
 
 # Find conversations for a project from the last seven days
-./session-finder recent -p my-project --since 7d
+session-finder recent -p my-project --since 7d
 
 # Restrict a search to one agent
-./session-finder search "authentication" --provider codex
+session-finder search "authentication" --provider codex
 
 # Match a normalized substring without typo tolerance
-./session-finder search "release workflow" --exact
+session-finder search "release workflow" --exact
 
 # List projects or browse conversations interactively
-./session-finder projects
-./session-finder browse
+session-finder projects
+session-finder browse
 ```
 
 Results default to the latest assistant reply. Use `--sort created` for creation order or `--sort relevance` for the best text matches. Add `-n 20 --offset 20` to paginate. Subagent sessions are hidden unless you use `--include-subagents` or look them up by ID.
@@ -82,16 +91,16 @@ Redirected output and JSON remain free of automatic terminal decoration.
 
 ```sh
 # Open a conversation by ID or a unique prefix of at least eight characters
-./session-finder show <ID>
+session-finder show <ID>
 
 # Follow Codex forks and subagents
-./session-finder relations <ID> --depth 3
+session-finder relations <ID> --depth 3
 
 # Export compact search results for scripts or other tools
-./session-finder search "authentication" --json
+session-finder search "authentication" --json
 
 # Request full session metadata
-./session-finder recent --json --verbose
+session-finder recent --json --verbose
 ```
 
 For Codex and TRAE CLI, `show` prints the user/assistant conversation; `show --json` includes its messages. For TRAE IDE, `show` returns the path to a temporary JSONL conversation file; `show --json` returns that file's metadata.
