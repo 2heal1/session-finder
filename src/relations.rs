@@ -5,7 +5,7 @@ use crate::{
     model::{Stats, parent_links, source_name},
     query::Output,
     text::session_id,
-    time::iso,
+    time::{iso, measure, union_ms},
 };
 use anyhow::{Result, bail};
 use rayon::prelude::*;
@@ -258,7 +258,7 @@ fn claim(
 ) {
     if parent == child {
         warnings.push(format!(
-            "忽略自身关系：{child} ({})，来源 {}",
+            "Ignoring self-relationship: {child} ({}) from {}",
             kind.name(),
             evidence.path
         ));
@@ -287,7 +287,7 @@ fn spawn_edges(path: &Path, claims: &mut Claims, warnings: &mut Vec<String>) -> 
         return Ok(false);
     }
     if !columns.contains("parent_thread_id") || !columns.contains("child_thread_id") {
-        bail!("thread_spawn_edges 表结构不兼容");
+        bail!("Incompatible thread_spawn_edges table schema");
     }
     let status = if columns.contains("status") {
         "status"
@@ -310,7 +310,7 @@ fn spawn_edges(path: &Path, claims: &mut Claims, warnings: &mut Vec<String>) -> 
         let (Some(parent), Some(child)) =
             (uuid(&Value::String(parent)), uuid(&Value::String(child)))
         else {
-            warnings.push("thread_spawn_edges 含无效 UUID，已跳过该行".into());
+            warnings.push("thread_spawn_edges contains an invalid UUID; row skipped".into());
             continue;
         };
         claim(
@@ -446,6 +446,7 @@ pub fn execute(request: &Request) -> Result<Output> {
         mode: "relations".into(),
         total_files: paths.len(),
         database_sessions: database.threads.len(),
+        metadata_read_ms: start.elapsed().as_secs_f64() * 1000.0,
         ..Default::default()
     };
     let mut coverage = Coverage {
@@ -489,21 +490,27 @@ pub fn execute(request: &Request) -> Result<Output> {
         }
     }
     if let Some(path) = &database.path {
-        match spawn_edges(path, &mut claims, &mut warnings) {
+        match measure(&mut stats.metadata_read_ms, || {
+            spawn_edges(path, &mut claims, &mut warnings)
+        }) {
             Ok(available) => coverage.spawn_table_available = available,
-            Err(e) => warnings.push(format!("子会话关系表不可用，继续读取 source 和日志：{e}")),
+            Err(e) => warnings.push(format!(
+                "Sub-session relationship table unavailable; reading source metadata and logs: {e}"
+            )),
         }
     }
     let mut cache = if options.no_cache {
         None
     } else {
-        match Cache::open(
-            &options.cache_dir.clone().unwrap_or_else(cache::directory),
-            &home,
-        ) {
+        match measure(&mut stats.cache_read_ms, || {
+            Cache::open(
+                &options.cache_dir.clone().unwrap_or_else(cache::directory),
+                &home,
+            )
+        }) {
             Ok(c) => Some(c),
             Err(e) => {
-                warnings.push(format!("缓存不可用，回退到日志：{e}"));
+                warnings.push(format!("Cache unavailable; reading logs: {e}"));
                 None
             }
         }
@@ -525,7 +532,7 @@ pub fn execute(request: &Request) -> Result<Output> {
                 coverage
                     .unreadable_logs
                     .push(path.to_string_lossy().into_owned());
-                warnings.push(format!("无法读取 {}: {e}", path.display()));
+                warnings.push(format!("Cannot read {}: {e}", path.display()));
                 continue;
             }
         };
@@ -533,14 +540,18 @@ pub fn execute(request: &Request) -> Result<Output> {
         if !options.refresh
             && let Some(cache) = &cache
         {
-            match cache.read_relation_header(&key, &signature) {
+            match measure(&mut stats.cache_read_ms, || {
+                cache.read_relation_header(&key, &signature)
+            }) {
                 Ok(Some(scan)) => {
                     stats.cached_files += 1;
                     loaded.push((key, scan));
                     continue;
                 }
                 Ok(None) => {}
-                Err(e) => warnings.push(format!("关系缓存记录不可用，回退到日志：{e}")),
+                Err(e) => warnings.push(format!(
+                    "Relationship cache record unavailable; reading logs: {e}"
+                )),
             }
         }
         pending.push((path, signature));
@@ -557,21 +568,23 @@ pub fn execute(request: &Request) -> Result<Output> {
         pending
             .par_iter()
             .map(|(path, signature)| {
+                let start = Instant::now();
                 let scan = read_header(path);
                 let stable = cache::fingerprint(path, None).ok().as_ref() == Some(signature);
-                (*path, signature, scan, stable)
+                (*path, signature, scan, stable, (start, Instant::now()))
             })
             .collect()
     });
+    stats.metadata_read_ms += union_ms(parsed.iter().map(|record| record.4).collect());
     let mut writes = Vec::new();
-    for (path, signature, scan, stable) in parsed {
+    for (path, signature, scan, stable, _) in parsed {
         stats.header_files += 1;
         let key = path.to_string_lossy().into_owned();
         match scan {
             Ok(scan) => {
                 if !stable {
                     warnings.push(format!(
-                        "日志正在写入，关系为本次读取快照：{}",
+                        "Log is being written; relationships reflect this read snapshot: {}",
                         path.display()
                     ));
                 } else if cache.is_some() {
@@ -581,7 +594,10 @@ pub fn execute(request: &Request) -> Result<Output> {
             }
             Err(e) => {
                 coverage.unreadable_logs.push(key);
-                warnings.push(format!("无法读取关系头 {}: {e}", path.display()));
+                warnings.push(format!(
+                    "Cannot read relationship header {}: {e}",
+                    path.display()
+                ));
             }
         }
     }
@@ -601,7 +617,7 @@ pub fn execute(request: &Request) -> Result<Output> {
         }
         if scan.malformed_lines > 0 || scan.incomplete_tail {
             warnings.push(format!(
-                "{}：关系头前有 {} 行无效 JSON，不完整尾行={}",
+                "{}: {} invalid JSON lines before relationship header, incomplete trailing record={}",
                 path, scan.malformed_lines, scan.incomplete_tail
             ));
         }
@@ -643,11 +659,13 @@ pub fn execute(request: &Request) -> Result<Output> {
     if let Some(cache) = &mut cache
         && let Err(e) = cache.save_relation_headers(&writes, &paths)
     {
-        warnings.push(format!("无法保存关系缓存，结果仍可用：{e}"));
+        warnings.push(format!(
+            "Cannot save relationship cache; results remain available: {e}"
+        ));
     }
     if !coverage.logs_without_own_metadata.is_empty() {
         warnings.push(format!(
-            "{} 个日志未找到自身 session_meta，关系覆盖可能不完整；详见 coverage",
+            "{} logs lack their own session_meta; relationship coverage may be incomplete; see coverage",
             coverage.logs_without_own_metadata.len()
         ));
     }
@@ -691,18 +709,18 @@ pub fn execute(request: &Request) -> Result<Output> {
     let prefix = options
         .id
         .as_deref()
-        .ok_or_else(|| anyhow::anyhow!("relations 需要 session ID"))?;
+        .ok_or_else(|| anyhow::anyhow!("relations requires a session ID"))?;
     let matches: Vec<_> = nodes
         .keys()
         .filter(|id| id.starts_with(prefix))
         .cloned()
         .collect();
     if matches.is_empty() {
-        bail!("没有找到本地会话或关系记录：{prefix}");
+        bail!("No local session or relationship record found: {prefix}");
     }
     if matches.len() != 1 {
         bail!(
-            "ID 前缀匹配 {} 个会话，请指定完整 ID：\n{}",
+            "ID prefix matches {} sessions; specify a full ID:\n{}",
             matches.len(),
             matches
                 .iter()
@@ -753,7 +771,7 @@ pub fn execute(request: &Request) -> Result<Output> {
         })
         .collect();
     if !conflicts.is_empty() {
-        warnings.push(format!("{} 组父关系冲突：关系表优先于数据库 source，再优先于日志；同级冲突不建边，详见 conflicts", conflicts.len()));
+        warnings.push(format!("{} parent relationship conflicts: relationship tables take priority over database source metadata, then logs; conflicts of equal priority produce no edge; see conflicts", conflicts.len()));
     }
     let nodes: Vec<_> = nodes
         .into_values()
@@ -762,7 +780,7 @@ pub fn execute(request: &Request) -> Result<Output> {
     stats.candidate_sessions = nodes.len();
     stats.candidate_files = nodes.iter().map(|n| n.paths.len()).sum();
     stats.indexed_sessions = nodes.len();
-    stats.elapsed_ms = start.elapsed().as_millis();
+    stats.finish(start);
     warnings.sort();
     warnings.dedup();
     coverage.unreadable_logs.sort();

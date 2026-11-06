@@ -248,7 +248,7 @@ fn export_failure_reports_an_error_without_printing_conversation_body() {
         assert!(!output.status.success());
         assert!(output.stdout.is_empty());
         let error = String::from_utf8(output.stderr).unwrap();
-        assert!(error.contains("无法生成 TRAE 临时对话文件"));
+        assert!(error.contains("Cannot create temporary TRAE conversation file"));
         assert!(!error.contains(PROMPT));
         assert!(!error.contains("长回复内容"));
     }

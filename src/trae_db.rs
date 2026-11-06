@@ -5,7 +5,7 @@ use crate::{
     cli::Options,
     model::{Message, Parsed, Provider, Scope, Session, Stats},
     parser::summarize,
-    time::{iso, millis_iso},
+    time::{iso, measure, millis_iso},
     trae::user_text,
 };
 use anyhow::{Context, Result, bail, ensure};
@@ -52,21 +52,24 @@ mod cipher {
     }
 
     pub fn key(library: &Path) -> Result<Zeroizing<Vec<u8>>> {
-        let mut file = fs::File::open(library).context("无法读取 TRAE 原生库")?;
+        let mut file = fs::File::open(library).context("Cannot read TRAE native library")?;
         let header = read_at::<32>(&mut file, 0)?;
         ensure!(
             header[..4] == [0xcf, 0xfa, 0xed, 0xfe],
-            "不支持的 TRAE 原生库格式"
+            "Unsupported TRAE native library format"
         );
         let count = u32::from_le_bytes(header[16..20].try_into()?);
-        ensure!(count < 1024, "TRAE 原生库头部无效");
+        ensure!(count < 1024, "Invalid TRAE native library header");
         let mut offset = 32;
         let mut supported = false;
         for _ in 0..count {
             let command = read_at::<8>(&mut file, offset)?;
             let kind = u32::from_le_bytes(command[..4].try_into()?);
             let size = u32::from_le_bytes(command[4..].try_into()?) as u64;
-            ensure!((8..=65536).contains(&size), "TRAE 原生库指令无效");
+            ensure!(
+                (8..=65536).contains(&size),
+                "Invalid TRAE native library load command"
+            );
             if kind == 0x1b && size == 24 {
                 supported = *read_at::<16>(&mut file, offset + 8)? == UUID;
             }
@@ -74,7 +77,7 @@ mod cipher {
         }
         ensure!(
             supported,
-            "当前 TRAE 原生库版本尚未适配；已验证 TRAE CN 3.4.15 arm64。可显式使用 --trae-index 或 --trae-ctx"
+            "Unsupported TRAE native library version; TRAE CN 3.4.15 arm64 is verified. Use --trae-index or --trae-ctx explicitly"
         );
         let mut input = read_at::<32>(&mut file, 0x6b29073)?;
         for (offset, size) in [(0x6b29020, 4), (0x6b29030, 3), (0x6cbe038, 8)] {
@@ -104,7 +107,7 @@ mod cipher {
         };
         ensure!(
             status == rusqlite::ffi::SQLITE_OK,
-            "TRAE 数据库密钥初始化失败"
+            "TRAE database key initialization failed"
         );
         Ok(())
     }
@@ -128,11 +131,11 @@ fn open_readonly(path: &Path, library: &Path) -> Result<Connection> {
         #[cfg(not(target_os = "macos"))]
         {
             let _ = library;
-            bail!("TRAE 加密数据库目前仅支持 macOS；可使用 --trae-index");
+            bail!("Encrypted TRAE databases currently require macOS; use --trae-index");
         }
     }
     conn.query_row("SELECT count(*) FROM sqlite_master", [], |_| Ok(()))
-        .context("无法读取 TRAE 数据库；原生库与数据库可能不匹配")?;
+        .context("Cannot read TRAE database; the native library and database may not match")?;
     // A transaction gives metadata and bodies a consistent view including WAL.
     // Do not use immutable=1 (it would ignore live WAL records).
     conn.execute_batch("PRAGMA query_only=ON; BEGIN DEFERRED;")?;
@@ -160,7 +163,7 @@ pub struct Store {
 
 impl Store {
     pub fn discover(options: &Options) -> Result<Option<Self>> {
-        let home = dirs::home_dir().context("无法确定用户目录")?;
+        let home = dirs::home_dir().context("Cannot determine home directory")?;
         let variants = ["Trae CN", "Trae"];
         let (path, app) = if let Some(path) = &options.trae_db {
             (path.clone(), "Trae CN")
@@ -175,7 +178,7 @@ impl Store {
         } else {
             ensure!(
                 options.trae_library.is_none(),
-                "未找到 TRAE 数据库，请指定 --trae-db"
+                "TRAE database not found; specify --trae-db"
             );
             return Ok(None);
         };
@@ -184,7 +187,9 @@ impl Store {
                 "/Applications/{app}.app/Contents/Resources/app/modules/ai-agent/libai_agent.dylib"
             ))
         });
-        let path = path.canonicalize().context("TRAE 数据库不存在")?;
+        let path = path
+            .canonicalize()
+            .context("TRAE database does not exist")?;
         let conn = open_readonly(&path, &library)?;
         Ok(Some(Self::from_connection(conn, &path, options)?))
     }
@@ -227,7 +232,7 @@ impl Store {
                  LEFT JOIN chat_message_task t ON t.message_id=m.message_id
                  LEFT JOIN chat_message_chat c ON c.message_id=m.message_id
                  ORDER BY m.session_id,m.message_index,m.message_id"
-            ).context("TRAE 数据库消息结构尚未适配")?;
+            ).context("Unsupported TRAE database message schema")?;
             let mut rows = stmt.query([])?;
             while let Some(row) = rows.next()? {
                 let id: String = row.get(0)?;
@@ -258,7 +263,7 @@ impl Store {
                      (SELECT sp.project_id FROM session_project sp WHERE sp.session_id=s.session_id ORDER BY sp.update_at DESC,sp.id DESC LIMIT 1))
                  LEFT JOIN worktree w ON w.worktree_id=s.worktree_id
                  WHERE COALESCE(s.deleted_at,0)=0 ORDER BY s.session_id"
-            ).context("TRAE 数据库会话结构尚未适配")?;
+            ).context("Unsupported TRAE database session schema")?;
             let mut rows = stmt.query([])?;
             while let Some(row) = rows.next()? {
                 let id: String = row.get(0)?;
@@ -355,11 +360,11 @@ impl Store {
                 "general" => 5,
                 "task" => 6,
                 "chat" => 7,
-                _ => bail!("TRAE 消息类型尚未适配：{kind}"),
+                _ => bail!("Unsupported TRAE message type: {kind}"),
             })?;
             let Some(data) = data else { continue };
-            let pieces =
-                decode(&kind, &data).with_context(|| format!("TRAE 消息 {id} 正文格式无效"))?;
+            let pieces = decode(&kind, &data)
+                .with_context(|| format!("Invalid body format for TRAE message {id}"))?;
             for piece in pieces {
                 let piece_role = piece.role.as_deref().unwrap_or(&role);
                 let text = if piece_role == "user" {
@@ -409,13 +414,28 @@ impl Store {
         stats: &mut Stats,
         warnings: &mut Vec<String>,
     ) -> Result<Vec<Loaded>> {
+        self.records_observed(options, stats, warnings, &mut |_| Ok(()))
+    }
+
+    pub fn records_observed(
+        &self,
+        options: &Options,
+        stats: &mut Stats,
+        warnings: &mut Vec<String>,
+        observer: &mut impl FnMut(&Loaded) -> Result<()>,
+    ) -> Result<Vec<Loaded>> {
         let mut cache = if options.no_cache {
             None
         } else {
-            match Cache::open(&self.root, &self.identity) {
+            match measure(&mut stats.cache_read_ms, || {
+                Cache::open(&self.root, &self.identity)
+            }) {
                 Ok(cache) => Some(cache),
                 Err(_) => {
-                    warnings.push("TRAE 派生缓存不可用，直接读取原生数据库".into());
+                    warnings.push(
+                        "TRAE derived cache unavailable; reading the native database directly"
+                            .into(),
+                    );
                     None
                 }
             }
@@ -437,18 +457,21 @@ impl Store {
             }
             let saved = if options.refresh {
                 None
-            } else {
-                cache.as_ref().and_then(|c| {
-                    c.read(&entry.session.path, &entry.signature, false, true)
+            } else if let Some(cache) = &cache {
+                measure(&mut stats.cache_read_ms, || {
+                    cache
+                        .read(&entry.session.path, &entry.signature, false, true)
                         .ok()
                         .flatten()
                 })
+            } else {
+                None
             };
             let loaded = if let Some(saved) = saved {
                 stats.cached_files += 1;
                 saved
             } else {
-                let parsed = self.parsed(entry, false)?;
+                let parsed = measure(&mut stats.body_read_ms, || self.parsed(entry, false))?;
                 let loaded = Loaded {
                     session: parsed.session,
                     search_text: parsed.search_text,
@@ -462,12 +485,13 @@ impl Store {
                 stats.parsed_files += 1;
                 loaded
             };
+            observer(&loaded)?;
             records.push(loaded);
         }
         if let Some(cache) = &mut cache
             && cache.save(&writes, &paths).is_err()
         {
-            warnings.push("TRAE 派生缓存写入失败，本次结果仍可用".into());
+            warnings.push("TRAE derived cache write failed; results remain available".into());
         }
         stats.total_files += paths.len();
         Ok(records)
@@ -478,7 +502,7 @@ impl Store {
             self.entries
                 .iter()
                 .find(|e| e.session.id == id)
-                .context("TRAE 会话不存在")?,
+                .context("TRAE conversation does not exist")?,
             true,
         )
     }
@@ -493,8 +517,11 @@ impl Store {
             .iter()
             .filter(|e| prefix.is_none_or(|p| e.session.id.starts_with(p)))
             .count();
-        ensure!(count > 0, "没有找到 TRAE 会话");
-        ensure!(prefix.is_none() || count == 1, "ID 前缀匹配多个 TRAE 会话");
+        ensure!(count > 0, "No TRAE conversations found");
+        ensure!(
+            prefix.is_none() || count == 1,
+            "ID prefix matches multiple TRAE conversations"
+        );
         // records() performs the forced conversion immediately after this call.
         Ok(count)
     }
@@ -607,7 +634,7 @@ fn decode(kind: &str, data: &str) -> Result<Vec<Piece>> {
             for (index, message) in task.messages.into_iter().enumerate() {
                 match message.r#type.as_str() {
                     "plan_item" => {
-                        let plan = message.plan_item.context("plan_item 缺少内容")?;
+                        let plan = message.plan_item.context("plan_item content is missing")?;
                         if plan.hide == Some(true) {
                             continue;
                         }
@@ -650,7 +677,7 @@ fn decode(kind: &str, data: &str) -> Result<Vec<Piece>> {
                     "append_input" => {
                         let input = message
                             .append_input
-                            .context("append_input 缺少内容")?
+                            .context("append_input content is missing")?
                             .payload
                             .data;
                         out.push(Piece {
@@ -660,12 +687,12 @@ fn decode(kind: &str, data: &str) -> Result<Vec<Piece>> {
                             ..Default::default()
                         });
                     }
-                    other => bail!("TRAE task 消息类型尚未适配：{other}"),
+                    other => bail!("Unsupported TRAE task message type: {other}"),
                 }
             }
             Ok(out)
         }
-        _ => bail!("不支持的正文类型"),
+        _ => bail!("Unsupported body type"),
     }
 }
 
@@ -736,6 +763,52 @@ mod tests {
         ];
         argv.extend(args.iter().map(|s| s.to_string()));
         Request::new(Cli::try_parse_from(argv).unwrap(), false).unwrap()
+    }
+
+    #[test]
+    fn native_incremental_matches_preserve_cold_warm_and_uncached_results() {
+        let root = tempfile::tempdir().unwrap();
+        let _writer = fixture(&root.path().join("database.db"), None);
+        for extra in [vec![], vec![], vec!["--no-cache"]] {
+            let mut args = vec!["search", "assistant-only-answer", "--sort", "relevance"];
+            args.extend(extra);
+            let req = request(root.path(), &args);
+            let mut candidate = None;
+            let mut completed = false;
+            let out = query::execute_incremental(&req, &mut |event| {
+                match event {
+                    query::Event::Candidate { session } => {
+                        assert!(!completed);
+                        assert_eq!(session.id, ID);
+                        assert!(session.match_score > 0.0);
+                        assert_eq!(session.project.name, "native-project");
+                        candidate = Some((session.id.clone(), session.match_score));
+                    }
+                    query::Event::Results { .. } => completed = true,
+                    _ => {}
+                }
+                Ok(())
+            })
+            .unwrap();
+            assert!(completed);
+            assert!(out.stats.metadata_read_ms > 0.0);
+            if out.stats.parsed_files > 0 {
+                assert!(out.stats.body_read_ms > 0.0);
+            } else {
+                assert_eq!(out.stats.body_read_ms, 0.0);
+            }
+            if req.options.no_cache {
+                assert_eq!(out.stats.cache_read_ms, 0.0);
+            } else {
+                assert!(out.stats.cache_read_ms > 0.0);
+            }
+            assert_eq!(
+                candidate,
+                Some((out.sessions[0].id.clone(), out.sessions[0].match_score))
+            );
+            let final_out = query::execute(&req).unwrap();
+            assert_eq!(out.json(&req)["sessions"], final_out.json(&req)["sessions"]);
+        }
     }
 
     #[test]
@@ -934,7 +1007,7 @@ mod tests {
             cipher::key(&fake_lib)
                 .unwrap_err()
                 .to_string()
-                .contains("尚未适配")
+                .contains("Unsupported")
         );
         assert_eq!(fs::read(&path).unwrap(), before);
         drop(writer);

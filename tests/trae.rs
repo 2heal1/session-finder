@@ -66,6 +66,51 @@ fn fixture() -> tempfile::TempDir {
 }
 
 #[test]
+fn incremental_snapshot_matches_arrive_before_other_provider_reads() {
+    let f = fixture();
+    let req = request(f.path(), &["search", "thredline", "--sort", "relevance"]);
+    for _ in 0..2 {
+        let mut codex_started = false;
+        let mut early_trae = false;
+        let mut live = session_finder::query::LiveResults::default();
+        let out = session_finder::query::execute_incremental(&req, &mut |event| {
+            match event {
+                session_finder::query::Event::Phase("Reading Codex metadata") => {
+                    codex_started = true
+                }
+                session_finder::query::Event::Candidate { session } => {
+                    live.update(session);
+                    if session.provider == Provider::Trae {
+                        assert!(!codex_started);
+                        assert!(session.match_score > 0.0);
+                        early_trae = true;
+                    }
+                }
+                _ => {}
+            }
+            Ok(())
+        })
+        .unwrap();
+        assert!(early_trae && codex_started);
+        let (total, page) = live.page(&req);
+        assert_eq!(total, out.total);
+        assert_eq!(
+            page.iter()
+                .map(|s| (s.provider, &s.id, s.match_score))
+                .collect::<Vec<_>>(),
+            out.sessions
+                .iter()
+                .map(|s| (s.provider, &s.id, s.match_score))
+                .collect::<Vec<_>>(),
+        );
+        assert_eq!(
+            out.json(&req)["sessions"],
+            execute(&req).unwrap().json(&req)["sessions"]
+        );
+    }
+}
+
+#[test]
 fn shared_scoring_global_pagination_and_namespaces() {
     let f = fixture();
     let req = request(f.path(), &["search", "thredline", "--sort", "relevance"]);
@@ -409,7 +454,8 @@ fn chinese_title_wording_can_match_query_text_without_fabricating_title() {
     assert!(
         out.warnings
             .iter()
-            .any(|s| s.contains("未包含 IDE 会话标题") && s.contains("1 个仅有索引提问"))
+            .any(|s| s.contains("does not include IDE session titles")
+                && s.contains("1 have only indexed queries"))
     );
     let warm = execute(&req).unwrap();
     assert_eq!(warm.total, out.total);
@@ -423,7 +469,10 @@ fn chinese_title_wording_can_match_query_text_without_fabricating_title() {
             .as_array()
             .unwrap()
             .iter()
-            .any(|v| v.as_str().unwrap().contains("未包含 IDE 会话标题"))
+            .any(|v| v
+                .as_str()
+                .unwrap()
+                .contains("does not include IDE session titles"))
     );
     let cli = Command::new(env!("CARGO_BIN_EXE_session-finder"))
         .args([
@@ -439,8 +488,8 @@ fn chinese_title_wording_can_match_query_text_without_fabricating_title() {
         .output()
         .unwrap();
     assert!(cli.status.success());
-    assert!(String::from_utf8_lossy(&cli.stdout).contains("匹配 0 个会话"));
-    assert!(String::from_utf8_lossy(&cli.stderr).contains("未包含 IDE 会话标题"));
+    assert!(String::from_utf8_lossy(&cli.stdout).contains("Matched 0 sessions"));
+    assert!(String::from_utf8_lossy(&cli.stderr).contains("does not include IDE session titles"));
 }
 
 fn metadata_index(metadata: Value) -> String {
@@ -495,13 +544,13 @@ fn true_titles_use_shared_exact_search_with_cold_warm_and_no_cache_parity() {
     assert!(
         cold.warnings
             .iter()
-            .any(|s| s.contains("包含 1 个 IDE 会话标题"))
+            .any(|s| s.contains("includes 1 IDE session titles"))
     );
     assert!(
         !cold
             .warnings
             .iter()
-            .any(|s| s.contains("未包含 IDE 会话标题"))
+            .any(|s| s.contains("does not include IDE session titles"))
     );
 }
 

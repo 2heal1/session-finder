@@ -54,8 +54,8 @@ fn json_stays_clean_and_timings_are_opt_in_on_stderr() {
         assert!(timed.status.success());
         let json: Value = serde_json::from_slice(&timed.stdout).unwrap();
         let stderr = String::from_utf8(timed.stderr).unwrap();
-        assert!(stderr.contains(&format!("耗时 {} ms", json["stats"]["elapsedMs"])));
-        assert_eq!(stderr.matches("耗时 ").count(), 1);
+        assert!(stderr.contains(&format!("Elapsed {} ms", json["stats"]["elapsedMs"])));
+        assert_eq!(stderr.matches("Elapsed ").count(), 1);
     }
 }
 
@@ -71,12 +71,20 @@ fn text_queries_report_read_counts_separately_from_results() {
     ] {
         let output = run(&root, &args);
         assert!(output.status.success());
-        assert!(!String::from_utf8(output.stdout).unwrap().contains("耗时 "));
+        let stdout = String::from_utf8(output.stdout).unwrap();
+        assert!(!stdout.contains("Elapsed "));
         let stderr = String::from_utf8(output.stderr).unwrap();
-        assert_eq!(stderr.matches("耗时 ").count(), 1);
-        assert!(stderr.contains("正文读取 "));
-        assert!(stderr.contains("元数据读取 "));
-        assert!(stderr.contains("缓存命中 "));
+        assert!(
+            stdout
+                .chars()
+                .chain(stderr.chars())
+                .all(|c| !('\u{4e00}'..='\u{9fff}').contains(&c)),
+            "CLI labels must be English: {stdout}\n{stderr}"
+        );
+        assert_eq!(stderr.matches("Elapsed ").count(), 1);
+        assert!(stderr.contains("Body reads "));
+        assert!(stderr.contains("Metadata reads "));
+        assert!(stderr.contains("Cache hits "));
     }
 }
 
@@ -90,6 +98,77 @@ fn errors_and_nonterminal_browse_do_not_report_success_timings() {
     ] {
         let output = run(&root, &args);
         assert!(!output.status.success());
-        assert!(!String::from_utf8(output.stderr).unwrap().contains("耗时 "));
+        assert!(
+            !String::from_utf8(output.stderr)
+                .unwrap()
+                .contains("Elapsed ")
+        );
+    }
+}
+
+#[test]
+fn read_timings_cover_each_provider_and_respect_cache_controls() {
+    let root = fixture();
+    let index = root.path().join("index.jsonl");
+    fs::write(
+        &index,
+        json!({
+            "conversation_id": "010000000000400080000001",
+            "sessions": [{"session_id":"010000000000400080000002", "user_query":"timing needle"}]
+        })
+        .to_string(),
+    )
+    .unwrap();
+    for (provider, source_flag, source) in [
+        ("codex", "--home", root.path()),
+        ("traecli", "--traecli-home", root.path()),
+        ("trae", "--trae-index", index.as_path()),
+    ] {
+        for mode in ["cold", "warm", "uncached"] {
+            let mut command = Command::new(env!("CARGO_BIN_EXE_session-finder"));
+            command
+                .args(["search", "needle", "--provider", provider, source_flag])
+                .arg(source)
+                .arg("--cache-dir")
+                .arg(root.path().join(format!("cache-{provider}")))
+                .arg("--json");
+            if mode == "uncached" {
+                command.arg("--no-cache");
+            }
+            let output = command.output().unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+            let stats = &value["stats"];
+            assert_eq!(value["total"], 1);
+            let mut sum = 0.0;
+            for field in ["bodyReadMs", "metadataReadMs", "cacheReadMs", "otherMs"] {
+                let ms = stats[field].as_f64().unwrap();
+                assert!(ms.is_finite() && ms >= 0.0, "{provider}/{mode}: {field}");
+                sum += ms;
+            }
+            let elapsed = stats["elapsedMs"].as_f64().unwrap();
+            assert!(
+                sum >= elapsed && sum < elapsed + 1.01,
+                "{provider}/{mode}: {stats}"
+            );
+            assert!(stats["metadataReadMs"].as_f64().unwrap() > 0.0);
+            if mode == "warm" {
+                assert_eq!(stats["parsedFiles"], 0);
+                assert_eq!(stats["bodyReadMs"], 0.0);
+                assert!(stats["cachedFiles"].as_u64().unwrap() > 0);
+            } else {
+                assert!(stats["bodyReadMs"].as_f64().unwrap() > 0.0);
+            }
+            if mode == "uncached" {
+                assert_eq!(stats["cacheReadMs"], 0.0);
+                assert_eq!(stats["cachedFiles"], 0);
+            } else {
+                assert!(stats["cacheReadMs"].as_f64().unwrap() > 0.0);
+            }
+        }
     }
 }

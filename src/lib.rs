@@ -4,6 +4,7 @@ pub mod cli;
 pub mod contextfs;
 pub mod model;
 pub mod parser;
+mod progress;
 pub mod project;
 pub mod query;
 pub mod relations;

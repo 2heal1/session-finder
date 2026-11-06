@@ -6,7 +6,7 @@ use crate::{
     model::{Message, Parsed, Provider, Scope, Session, Stats},
     parser::summarize,
     text::clean_user,
-    time::iso,
+    time::{iso, measure},
 };
 use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
@@ -100,12 +100,17 @@ fn read_text(path: &Path) -> Result<String> {
     fs::File::open(path)?
         .take(MAX_FILE + 1)
         .read_to_end(&mut bytes)?;
-    ensure!(bytes.len() as u64 <= MAX_FILE, "TRAE 快照超过大小限制");
-    String::from_utf8(bytes).context("TRAE 快照不是 UTF-8 文本")
+    ensure!(
+        bytes.len() as u64 <= MAX_FILE,
+        "TRAE snapshot exceeds size limit"
+    );
+    String::from_utf8(bytes).context("TRAE snapshot is not UTF-8 text")
 }
 
 pub(crate) fn atomic_json(path: &Path, data: &impl Serialize) -> Result<()> {
-    let parent = path.parent().context("快照路径缺少父目录")?;
+    let parent = path
+        .parent()
+        .context("Snapshot path has no parent directory")?;
     fs::DirBuilder::new()
         .recursive(true)
         .mode(0o700)
@@ -139,13 +144,14 @@ fn validate(rows: Vec<Row>) -> Result<Vec<Row>> {
     for mut row in rows {
         ensure!(
             valid_id(&row.conversation_id),
-            "TRAE 索引 conversation_id 无效"
+            "Invalid TRAE index conversation_id"
         );
         row.conversation_id.make_ascii_lowercase();
         if let Some(metadata) = &mut row.metadata {
             validate_time(&metadata.created_at)?;
             if let Some(time) = &mut metadata.created_at {
-                *time = iso(&Value::String(time.clone())).context("TRAE 元数据时间无效")?;
+                *time =
+                    iso(&Value::String(time.clone())).context("Invalid TRAE metadata timestamp")?;
             }
             for field in [
                 &mut metadata.title,
@@ -176,12 +182,15 @@ fn validate(rows: Vec<Row>) -> Result<Vec<Row>> {
             out[index].metadata = row.metadata;
         }
         for mut turn in row.sessions {
-            ensure!(valid_id(&turn.session_id), "TRAE 索引轮次 ID 无效");
+            ensure!(valid_id(&turn.session_id), "Invalid TRAE index turn ID");
             turn.session_id.make_ascii_lowercase();
             // Never retain injected context in source snapshots.
             turn.user_query = user_text(&turn.user_query);
             if let Some(&(owner, position)) = turns.get(&turn.session_id) {
-                ensure!(owner == index, "TRAE 轮次同时属于多个会话");
+                ensure!(
+                    owner == index,
+                    "TRAE turn belongs to multiple conversations"
+                );
                 out[index].sessions[position] = turn;
             } else {
                 turns.insert(turn.session_id.clone(), (index, out[index].sessions.len()));
@@ -201,7 +210,9 @@ pub fn parse_index(text: &str) -> Result<Vec<Row>> {
     let rows = text
         .lines()
         .filter(|s| !s.trim().is_empty())
-        .map(|line| serde_json::from_str(line).map_err(|_| anyhow::anyhow!("TRAE 索引行格式无效")))
+        .map(|line| {
+            serde_json::from_str(line).map_err(|_| anyhow::anyhow!("Invalid TRAE index row format"))
+        })
         .collect::<Result<Vec<_>>>()?;
     validate(rows)
 }
@@ -267,7 +278,7 @@ fn approval_result(text: &str) -> bool {
 }
 
 pub fn convert_turn(text: &str, turn_id: &str) -> Result<Vec<Message>> {
-    ensure!(valid_id(turn_id), "无效的 TRAE 轮次 ID");
+    ensure!(valid_id(turn_id), "Invalid TRAE turn ID");
     let mut out: Vec<Message> = Vec::new();
     let mut ids: HashMap<(String, String), usize> = HashMap::new();
     let mut pending_approvals = 0usize;
@@ -275,9 +286,13 @@ pub fn convert_turn(text: &str, turn_id: &str) -> Result<Vec<Message>> {
         if line.trim().is_empty() {
             continue;
         }
-        let record: Value = serde_json::from_str(line)
-            .map_err(|_| anyhow::anyhow!("TRAE 正文第 {} 行无效；未更新快照", number + 1))?;
-        ensure!(record.is_object(), "TRAE 正文行不是对象");
+        let record: Value = serde_json::from_str(line).map_err(|_| {
+            anyhow::anyhow!(
+                "Invalid TRAE body at line {}; snapshot was not updated",
+                number + 1
+            )
+        })?;
+        ensure!(record.is_object(), "TRAE body row is not an object");
         let role = match record["role"].as_str() {
             Some("user") => "user",
             Some("assistant") => "assistant",
@@ -422,13 +437,23 @@ impl Store {
         stats: &mut Stats,
         warnings: &mut Vec<String>,
     ) -> Result<Vec<Loaded>> {
+        self.records_observed(options, stats, warnings, &mut |_| Ok(()))
+    }
+
+    pub fn records_observed(
+        &self,
+        options: &Options,
+        stats: &mut Stats,
+        warnings: &mut Vec<String>,
+        observer: &mut impl FnMut(&Loaded) -> Result<()>,
+    ) -> Result<Vec<Loaded>> {
         match &self.native {
-            Some(store) => store.records(options, stats, warnings),
+            Some(store) => store.records_observed(options, stats, warnings, observer),
             None => self
                 .snapshot
                 .as_ref()
                 .unwrap()
-                .records(options, stats, warnings),
+                .records_observed(options, stats, warnings, observer),
         }
     }
 
@@ -469,12 +494,17 @@ impl SnapshotStore {
         if let Some(path) = &options.trae_index {
             ensure!(
                 !options.refresh,
-                "--trae-index 是离线导出，不支持 --refresh"
+                "--trae-index selects an offline export and does not support --refresh"
             );
-            let path = path.canonicalize().context("TRAE 离线索引不存在")?;
+            let path = path
+                .canonicalize()
+                .context("TRAE offline index does not exist")?;
             let text = read_text(&path)?;
             let (rows, indexed_at) = if let Ok(snapshot) = serde_json::from_str::<Snapshot>(&text) {
-                ensure!(snapshot.schema_version == SCHEMA, "TRAE 索引快照版本不兼容");
+                ensure!(
+                    snapshot.schema_version == SCHEMA,
+                    "Incompatible TRAE index snapshot version"
+                );
                 validate_time(&snapshot.indexed_at)?;
                 (validate(snapshot.rows)?, snapshot.indexed_at)
             } else {
@@ -509,11 +539,13 @@ impl SnapshotStore {
             snapshot
         } else {
             let snapshot: Snapshot = serde_json::from_str(&read_text(&path)?).map_err(|_| {
-                anyhow::anyhow!("TRAE 查询快照无效，请在 Agent 环境加 --refresh 重建")
+                anyhow::anyhow!(
+                    "Invalid TRAE query snapshot; rebuild with --refresh in the Agent environment"
+                )
             })?;
             ensure!(
                 snapshot.schema_version == SCHEMA && snapshot.reader == identity,
-                "TRAE 查询快照来源或版本不符，请加 --refresh"
+                "TRAE query snapshot source or version mismatch; use --refresh"
             );
             validate_time(&snapshot.indexed_at)?;
             snapshot
@@ -541,11 +573,11 @@ impl SnapshotStore {
             return Ok(None);
         }
         let saved: Transcript = serde_json::from_str(&read_text(&path)?)
-            .map_err(|_| anyhow::anyhow!("TRAE 正文快照格式无效"))?;
+            .map_err(|_| anyhow::anyhow!("Invalid TRAE body snapshot format"))?;
         ensure!(
             saved.schema_version == TRANSCRIPT_SCHEMA
                 && saved.conversation_id == row.conversation_id,
-            "TRAE 正文快照版本或会话不符"
+            "TRAE body snapshot version or conversation mismatch"
         );
         validate_time(&Some(saved.synced_at.clone()))?;
         if saved.index_signature != transcript_signature(row)? {
@@ -558,7 +590,7 @@ impl SnapshotStore {
                 .iter()
                 .all(|m| matches!(m.role.as_str(), "user" | "assistant")
                     && m.turn_id.as_deref().is_some_and(|id| turns.contains(id))),
-            "TRAE 正文快照包含无效消息"
+            "TRAE body snapshot contains invalid messages"
         );
         Ok(Some(saved))
     }
@@ -614,19 +646,18 @@ impl SnapshotStore {
             .iter()
             .filter(|row| id.is_none_or(|prefix| row.conversation_id.starts_with(prefix)))
             .collect();
-        ensure!(!rows.is_empty(), "没有找到可同步的 TRAE 会话");
+        ensure!(!rows.is_empty(), "No TRAE conversations available to sync");
         ensure!(
             id.is_none() || rows.len() == 1,
-            "ID 前缀匹配多个 TRAE 会话，请使用完整 ID"
+            "ID prefix matches multiple TRAE conversations; use a full ID"
         );
-        let reader = self
-            .reader
-            .as_ref()
-            .context("离线导出不可实时同步，请移除 --trae-index 并选择 --trae-ctx")?;
+        let reader = self.reader.as_ref().context(
+            "Offline exports cannot sync live; remove --trae-index and select --trae-ctx",
+        )?;
         let client = Client::from_env(reader)?;
         for (i, row) in rows.iter().enumerate() {
             eprintln!(
-                "同步 TRAE {}/{} · {} · {} 个轮次",
+                "Syncing TRAE {}/{} · {} · {} turns",
                 i + 1,
                 rows.len(),
                 row.conversation_id,
@@ -642,7 +673,7 @@ impl SnapshotStore {
             .rows
             .iter()
             .find(|r| r.conversation_id == id)
-            .context("TRAE 会话不在索引内")?;
+            .context("TRAE conversation is not in the index")?;
         let mut transcript = if refresh { None } else { self.transcript(row)? };
         if refresh || transcript.is_none() {
             self.sync(Some(id))?;
@@ -651,20 +682,36 @@ impl SnapshotStore {
         Ok(self.parsed(row, transcript, true))
     }
 
+    #[cfg(test)]
     pub fn records(
         &self,
         options: &Options,
         stats: &mut Stats,
         warnings: &mut Vec<String>,
     ) -> Result<Vec<Loaded>> {
+        self.records_observed(options, stats, warnings, &mut |_| Ok(()))
+    }
+
+    pub fn records_observed(
+        &self,
+        options: &Options,
+        stats: &mut Stats,
+        warnings: &mut Vec<String>,
+        observer: &mut impl FnMut(&Loaded) -> Result<()>,
+    ) -> Result<Vec<Loaded>> {
         let namespace = PathBuf::from(format!("trae-adapter-v3:{}", self.identity));
         let mut cache = if options.no_cache {
             None
         } else {
-            match Cache::open(&self.root, &namespace) {
+            match measure(&mut stats.cache_read_ms, || {
+                Cache::open(&self.root, &namespace)
+            }) {
                 Ok(c) => Some(c),
                 Err(_) => {
-                    warnings.push("TRAE 派生索引不可用，直接转换本地快照".into());
+                    warnings.push(
+                        "TRAE derived index unavailable; converting local snapshots directly"
+                            .into(),
+                    );
                     None
                 }
             }
@@ -693,27 +740,32 @@ impl SnapshotStore {
                     String::new()
                 }
             );
-            let mut loaded = if !options.refresh {
-                cache
-                    .as_ref()
-                    .and_then(|c| c.read(&path, &signature, true, true).ok().flatten())
+            let mut loaded = if !options.refresh
+                && let Some(cache) = &cache
+            {
+                measure(&mut stats.cache_read_ms, || {
+                    cache.read(&path, &signature, true, true).ok().flatten()
+                })
             } else {
                 None
             };
             if loaded.is_some() {
                 stats.cached_files += 1;
             } else {
-                let (transcript, cacheable) = match self.transcript(row) {
+                let transcript = measure(&mut stats.body_read_ms, || self.transcript(row));
+                let (transcript, cacheable) = match transcript {
                     Ok(t) => (t, true),
                     Err(_) => {
                         warnings.push(format!(
-                            "{} 正文快照无效，搜索仅覆盖索引提问；请重新 sync",
+                            "{} has an invalid body snapshot; search covers only indexed queries; run sync again",
                             row.conversation_id
                         ));
                         (None, false)
                     }
                 };
-                let parsed = self.parsed(row, transcript, false);
+                let parsed = measure(&mut stats.body_read_ms, || {
+                    self.parsed(row, transcript, false)
+                });
                 loaded = Some(Loaded {
                     session: parsed.session,
                     search_text: parsed.search_text,
@@ -731,12 +783,14 @@ impl SnapshotStore {
             }
             let mut loaded = loaded.unwrap();
             loaded.session.index_source = Some(self.source.clone());
+            observer(&loaded)?;
             records.push(loaded);
         }
         if let Some(cache) = &mut cache
             && cache.save(&writes, &paths).is_err()
         {
-            warnings.push("TRAE 派生索引写入失败，本次搜索结果仍可用".into());
+            warnings
+                .push("TRAE derived index write failed; search results remain available".into());
         }
         stats.total_files += paths.len();
         Ok(records)
@@ -747,7 +801,7 @@ fn validate_time(value: &Option<String>) -> Result<()> {
     if let Some(value) = value {
         ensure!(
             chrono::DateTime::parse_from_rfc3339(value).is_ok(),
-            "TRAE 快照时间无效"
+            "Invalid TRAE snapshot timestamp"
         );
     }
     Ok(())

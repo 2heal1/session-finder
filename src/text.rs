@@ -21,6 +21,25 @@ static HAN_PHRASE: LazyLock<Regex> =
 static WORD: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"[a-z0-9]+").unwrap());
 
 pub fn session_id(text: &str) -> Option<String> {
+    let trimmed = text.trim();
+    if (trimmed.starts_with("trae-cn://") || trimmed.starts_with("trae://"))
+        && let Ok(url) = url::Url::parse(trimmed)
+        && matches!(url.scheme(), "trae-cn" | "trae")
+        && url.host_str() == Some("session-finder.trae-session-link")
+    {
+        if url.path() != "/open" {
+            return None;
+        }
+        // An encoded cwd may itself contain a UUID. This URI's id parameter
+        // identifies the conversation; generic UUID scanning must not replace it.
+        let ids: Vec<_> = url.query_pairs().filter(|(key, _)| key == "id").collect();
+        if ids.len() != 1 {
+            return None;
+        }
+        let id = &ids[0].1;
+        return (id.len() == 24 && id.bytes().all(|b| b.is_ascii_hexdigit()))
+            .then(|| id.to_ascii_lowercase());
+    }
     UUID.find(text)
         .map(|m| m.as_str().to_ascii_lowercase())
         .or_else(|| {

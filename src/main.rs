@@ -1,7 +1,7 @@
 use clap::Parser;
 use session_finder::{
     cli::{Action, Cli, Request},
-    query, render,
+    render,
 };
 use std::io::IsTerminal;
 
@@ -14,7 +14,7 @@ fn run() -> anyhow::Result<()> {
     if request.action == Action::Browse {
         render::browse(&request)
     } else {
-        render::output(&query::execute(&request)?, &request)
+        render::run(&request)
     }
 }
 

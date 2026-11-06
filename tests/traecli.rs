@@ -398,10 +398,10 @@ fn all_merges_three_providers_and_disambiguates_same_uuid() {
         .err()
         .unwrap()
         .to_string();
-    assert!(err.contains("匹配 2 个会话"));
+    assert!(err.contains("matches 2 sessions"));
     assert!(err.contains("traecli:"));
     let default_error = execute(&f.req("", &["show", A])).err().unwrap().to_string();
-    assert!(default_error.contains("匹配 2 个会话"));
+    assert!(default_error.contains("matches 2 sessions"));
     assert_eq!(
         execute(&f.req("", &["--id", "010000000000400080000001"]))
             .unwrap()
@@ -455,11 +455,15 @@ fn default_search_keeps_available_sources_when_other_sources_are_missing() {
     let out = execute(&req).unwrap();
     assert_eq!(out.total, 1);
     assert_eq!(out.sessions[0].provider, Provider::Codex);
-    assert!(out.warnings.iter().any(|s| s.contains("TRAE 来源不可用")));
     assert!(
         out.warnings
             .iter()
-            .any(|s| s.contains("TRAE CLI 来源不可用"))
+            .any(|s| s.contains("TRAE source unavailable"))
+    );
+    assert!(
+        out.warnings
+            .iter()
+            .any(|s| s.contains("TRAE CLI source unavailable"))
     );
     req.options.refresh = true;
     assert!(execute(&req).is_err());
@@ -569,7 +573,7 @@ fn unsupported_history_is_reported_without_silently_indexing_partial_text() {
     assert!(
         out.warnings
             .iter()
-            .any(|w| w.contains("history_mutation 版本"))
+            .any(|w| w.contains("history_mutation version"))
     );
 }
 

@@ -1,0 +1,10 @@
+{
+  "name": "trae-session-link",
+  "displayName": "Session Finder Link Demo",
+  "description": "Experimental bridge from external links to existing TRAE Agent conversations.",
+  "version": "0.0.3",
+  "publisher": "session-finder",
+  "engines": { "vscode": "^1.104.0" },
+  "activationEvents": ["onUri"],
+  "main": "./extension.js"
+}

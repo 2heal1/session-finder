@@ -32,7 +32,9 @@ pub fn discover(explicit: Option<&Path>) -> Result<PathBuf> {
         .map(PathBuf::from)
         .or_else(|| std::env::var_os("SESSION_FINDER_TRAE_CTX").map(PathBuf::from))
     {
-        return path.canonicalize().context("指定的 TRAE ctx-cli 不存在");
+        return path
+            .canonicalize()
+            .context("Specified TRAE ctx-cli does not exist");
     }
     if let Some(root) = std::env::var_os("ICUBE_APP_ROOT") {
         let path = PathBuf::from(root).join("modules/ai-agent/bin/ctx-cli");
@@ -57,7 +59,7 @@ pub fn discover(explicit: Option<&Path>) -> Result<PathBuf> {
     candidates.dedup();
     ensure!(
         candidates.len() == 1,
-        "发现 {} 个 TRAE IDE 安装，请用 --trae-ctx /path/to/ctx-cli 选择",
+        "Found {} TRAE IDE installations; select one with --trae-ctx /path/to/ctx-cli",
         candidates.len()
     );
     Ok(candidates.remove(0))
@@ -80,16 +82,16 @@ impl Client {
             token.is_some()
                 && socket.is_some()
                 && std::env::var("CFS_TRANSPORT").as_deref() == Ok("ipc"),
-            "缺少 ContextFS IPC 凭据。请在 TRAE Agent 环境运行 search --provider trae --refresh 或 sync --provider trae；之后普通终端可搜索本地快照"
+            "Missing ContextFS IPC credentials. Run search --provider trae --refresh or sync --provider trae in the TRAE Agent environment; ordinary terminals can then search local snapshots"
         );
         if let Some(root) = std::env::var_os("ICUBE_APP_ROOT") {
             let runtime = PathBuf::from(root)
                 .join("modules/ai-agent/bin/ctx-cli")
                 .canonicalize()
-                .context("无法确认当前 TRAE 应用")?;
+                .context("Cannot identify the current TRAE application")?;
             ensure!(
                 runtime == reader.canonicalize()?,
-                "指定的 TRAE 安装与当前 Agent 所属应用不一致"
+                "Specified TRAE installation does not match the current Agent application"
             );
         }
         Ok(Self {
@@ -150,25 +152,31 @@ fn frame(body: &[u8]) -> Vec<u8> {
 
 impl Reader for Client {
     fn read(&self, path: &str) -> Result<String> {
-        ensure!(path.starts_with("context://history/"), "仅支持读取会话历史");
+        ensure!(
+            path.starts_with("context://history/"),
+            "Only conversation history reads are supported"
+        );
         let mut socket = UnixStream::connect(&self.socket).context(
-            "连接 TRAE ContextFS 失败；请重新打开 TRAE Agent 环境后重试，若仍失败请重启 IDE。已有本地快照仍可不加 --refresh 搜索",
+            "Cannot connect to TRAE ContextFS; reopen the TRAE Agent environment and retry, then restart the IDE if needed. Existing local snapshots can still be searched without --refresh",
         )?;
         socket.set_read_timeout(Some(Duration::from_secs(35)))?;
         socket.set_write_timeout(Some(Duration::from_secs(35)))?;
         socket
             .write_all(&request(path, &self.token))
-            .context("发送 ContextFS 读取请求失败")?;
+            .context("Cannot send ContextFS read request")?;
         let mut length = [0; 4];
         socket
             .read_exact(&mut length)
-            .context("读取 ContextFS 响应头失败")?;
+            .context("Cannot read ContextFS response header")?;
         let length = u32::from_be_bytes(length) as usize;
-        ensure!((14..=MAX_FRAME).contains(&length), "ContextFS 响应长度无效");
+        ensure!(
+            (14..=MAX_FRAME).contains(&length),
+            "Invalid ContextFS response length"
+        );
         let mut bytes = vec![0; length];
         socket
             .read_exact(&mut bytes)
-            .context("读取 ContextFS 响应失败")?;
+            .context("Cannot read ContextFS response")?;
         response(&bytes)
     }
 }
@@ -183,14 +191,14 @@ enum Value {
 impl Value {
     fn get(&self, id: i16) -> Result<&Value> {
         match self {
-            Self::Fields(fields) => fields.get(&id).context("ContextFS 响应缺少字段"),
-            _ => bail!("ContextFS 响应结构无效"),
+            Self::Fields(fields) => fields.get(&id).context("ContextFS response field missing"),
+            _ => bail!("Invalid ContextFS response structure"),
         }
     }
     fn text(&self) -> Result<&str> {
         match self {
             Self::Text(s) => Ok(s),
-            _ => bail!("ContextFS 响应文本无效"),
+            _ => bail!("Invalid ContextFS response text"),
         }
     }
 }
@@ -200,7 +208,7 @@ struct Decoder<'a> {
 }
 impl<'a> Decoder<'a> {
     fn take(&mut self, n: usize) -> Result<&'a [u8]> {
-        ensure!(n <= self.bytes.len(), "ContextFS 响应被截断");
+        ensure!(n <= self.bytes.len(), "Truncated ContextFS response");
         let (head, tail) = self.bytes.split_at(n);
         self.bytes = tail;
         Ok(head)
@@ -218,7 +226,7 @@ impl<'a> Decoder<'a> {
         let n = self.i32()?;
         ensure!(
             n >= 0 && n as usize <= self.bytes.len(),
-            "ContextFS 字段长度无效"
+            "Invalid ContextFS field length"
         );
         Ok(n as usize)
     }
@@ -226,10 +234,10 @@ impl<'a> Decoder<'a> {
         let n = self.count()?;
         // Do not attach UTF-8/JSON errors with payload text: it may contain private content.
         String::from_utf8(self.take(n)?.to_vec())
-            .map_err(|_| anyhow::anyhow!("ContextFS 文本编码无效"))
+            .map_err(|_| anyhow::anyhow!("Invalid ContextFS text encoding"))
     }
     fn value(&mut self, kind: u8, depth: usize) -> Result<Value> {
-        ensure!(depth < 32, "ContextFS 响应嵌套过深");
+        ensure!(depth < 32, "ContextFS response nesting is too deep");
         Ok(match kind {
             2 | 3 => Value::Number(self.byte()? as i8 as i64),
             6 => Value::Number(self.i16()? as i64),
@@ -249,7 +257,10 @@ impl<'a> Decoder<'a> {
                     }
                     let id = self.i16()?;
                     let value = self.value(kind, depth + 1)?;
-                    ensure!(fields.insert(id, value).is_none(), "ContextFS 重复响应字段");
+                    ensure!(
+                        fields.insert(id, value).is_none(),
+                        "Duplicate ContextFS response field"
+                    );
                 }
                 Value::Fields(fields)
             }
@@ -271,53 +282,65 @@ impl<'a> Decoder<'a> {
                 }
                 Value::Other
             }
-            _ => bail!("ContextFS 不支持的响应字段类型"),
+            _ => bail!("Unsupported ContextFS response field type"),
         })
     }
 }
 
 fn response(bytes: &[u8]) -> Result<String> {
-    ensure!(bytes.len() <= MAX_FRAME, "ContextFS 响应过大");
+    ensure!(
+        bytes.len() <= MAX_FRAME,
+        "ContextFS response exceeds size limit"
+    );
     let mut d = Decoder { bytes };
     ensure!(
         d.i16()? == 0x1000 && d.i16()? == 0 && d.i32()? == 0,
-        "ContextFS TTHeader 无效"
+        "Invalid ContextFS TTHeader"
     );
     let words = d.i16()?;
-    ensure!(words > 0, "ContextFS TTHeader 长度无效");
+    ensure!(words > 0, "Invalid ContextFS TTHeader length");
     let header = d.take(words as usize * 4)?;
-    ensure!(header.starts_with(&[0, 0]), "ContextFS 不支持的协议或压缩");
+    ensure!(
+        header.starts_with(&[0, 0]),
+        "Unsupported ContextFS protocol or compression"
+    );
     let mut version = d.i32()? as u32;
     if version & 0xffff0000 != 0x80010000 {
         ensure!(
             version as usize == d.bytes.len(),
-            "ContextFS Thrift 帧长度不符"
+            "ContextFS Thrift frame length mismatch"
         );
         version = d.i32()? as u32;
     }
-    ensure!(version == 0x80010002, "ContextFS 返回异常或不支持的消息");
+    ensure!(
+        version == 0x80010002,
+        "ContextFS returned an exception or unsupported message"
+    );
     ensure!(
         d.text()? == METHOD && d.i32()? == 0,
-        "ContextFS 响应方法或序号不符"
+        "ContextFS response method or sequence mismatch"
     );
     let result = d.value(12, 0)?;
-    ensure!(d.bytes.is_empty(), "ContextFS 响应含意外尾部");
+    ensure!(
+        d.bytes.is_empty(),
+        "Unexpected trailing ContextFS response data"
+    );
     let result = result.get(0)?;
     let status = result.get(1)?;
     ensure!(
         status.get(1)?.text()? == "ok" && matches!(status.get(2)?, Value::Number(0)),
-        "ContextFS 服务拒绝读取请求"
+        "ContextFS service rejected the read request"
     );
     let payload: serde_json::Value = serde_json::from_str(result.get(2)?.get(1)?.text()?)
-        .map_err(|_| anyhow::anyhow!("ContextFS 返回无效 JSON"))?;
+        .map_err(|_| anyhow::anyhow!("ContextFS returned invalid JSON"))?;
     ensure!(
         payload["code"].as_i64() == Some(0),
-        "ContextFS 文件读取失败"
+        "ContextFS file read failed"
     );
     payload["data"]
         .as_str()
         .map(str::to_owned)
-        .context("ContextFS 未返回文件正文")
+        .context("ContextFS returned no file content")
 }
 
 #[cfg(test)]

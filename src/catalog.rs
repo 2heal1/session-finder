@@ -18,7 +18,7 @@ pub fn walk(directory: &Path, paths: &mut Vec<PathBuf>, warnings: &mut Vec<Strin
         Ok(v) => v,
         Err(e) => {
             if e.kind() != std::io::ErrorKind::NotFound {
-                warnings.push(format!("无法读取 {}: {e}", directory.display()));
+                warnings.push(format!("Cannot read {}: {e}", directory.display()));
             }
             return;
         }
@@ -27,7 +27,7 @@ pub fn walk(directory: &Path, paths: &mut Vec<PathBuf>, warnings: &mut Vec<Strin
         let entry = match entry {
             Ok(v) => v,
             Err(e) => {
-                warnings.push(format!("目录读取失败：{e}"));
+                warnings.push(format!("Directory read failed: {e}"));
                 continue;
             }
         };
@@ -42,7 +42,7 @@ pub fn walk(directory: &Path, paths: &mut Vec<PathBuf>, warnings: &mut Vec<Strin
                     paths.push(entry.path());
                 }
             }
-            Err(e) => warnings.push(format!("无法读取 {}: {e}", entry.path().display())),
+            Err(e) => warnings.push(format!("Cannot read {}: {e}", entry.path().display())),
             _ => {}
         }
     }
@@ -57,7 +57,7 @@ pub fn titles(home: &Path, warnings: &mut Vec<String>) -> HashMap<String, String
                 let line = match line {
                     Ok(v) => v,
                     Err(e) => {
-                        warnings.push(format!("标题索引读取失败：{e}"));
+                        warnings.push(format!("Title index read failed: {e}"));
                         break;
                     }
                 };
@@ -83,7 +83,7 @@ pub fn titles(home: &Path, warnings: &mut Vec<String>) -> HashMap<String, String
             }
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-        Err(e) => warnings.push(format!("标题索引不可读：{e}")),
+        Err(e) => warnings.push(format!("Title index unreadable: {e}")),
     }
     titles
         .into_iter()
@@ -105,7 +105,7 @@ fn database_file(path: &Path) -> anyhow::Result<HashMap<String, DbMeta>> {
     if required.iter().any(|c| !columns.contains(*c))
         || (!columns.contains("created_at") && !columns.contains("created_at_ms"))
     {
-        anyhow::bail!("threads 表结构不兼容");
+        anyhow::bail!("Incompatible threads table schema");
     }
     let created = match (
         columns.contains("created_at_ms"),
@@ -235,7 +235,7 @@ pub fn database_catalog(home: &Path, warnings: &mut Vec<String>) -> Database {
     }
     if let Some(e) = failure {
         warnings.push(format!(
-            "{} 元数据不可用，已回退到日志：{e}",
+            "{} metadata unavailable; reading logs: {e}",
             home.display()
         ));
     }

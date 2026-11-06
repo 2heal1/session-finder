@@ -5,7 +5,7 @@ use crate::{
     model::{DbMeta, Message, Project, Provider, Session, Stats},
     parser, project,
     text::{normalize, score_normalized, session_id},
-    time::ms,
+    time::{measure, ms, union_ms},
 };
 use anyhow::{Context, Result, bail};
 use rayon::prelude::*;
@@ -164,7 +164,14 @@ impl Engine<'_> {
         s
     }
 
-    fn load(&mut self, paths: &[PathBuf], header: bool, full: bool) -> Vec<Session> {
+    fn load(
+        &mut self,
+        paths: &[PathBuf],
+        header: bool,
+        full: bool,
+        progressive: bool,
+        observer: &mut impl FnMut(Event<'_>) -> Result<()>,
+    ) -> Result<Vec<Session>> {
         let mut records = Vec::new();
         let mut pending = Vec::new();
         for path in paths {
@@ -173,7 +180,10 @@ impl Engine<'_> {
                 && (header || saved.session.message_count.is_some())
                 && (!full || saved.search_text.is_some())
             {
-                records.push(self.decorate(saved.session.clone()));
+                let session = self.decorate(saved.session.clone());
+                let loaded = self.loaded.get(&(Provider::Codex, key));
+                emit_candidate(&session, loaded, self.request, progressive, observer)?;
+                records.push(session);
                 continue;
             }
             let id = path
@@ -184,42 +194,75 @@ impl Engine<'_> {
             let signature = match cache::fingerprint(path, db.as_ref()) {
                 Ok(v) => v,
                 Err(e) => {
-                    self.warnings.push(format!("跳过 {}: {e}", path.display()));
+                    self.warnings
+                        .push(format!("Skipping {}: {e}", path.display()));
                     continue;
                 }
             };
             if !self.request.options.refresh
                 && let Some(cache) = &self.cache
             {
-                match cache.read(&key, &signature, header, full) {
+                match measure(&mut self.stats.cache_read_ms, || {
+                    cache.read(&key, &signature, header, full)
+                }) {
                     Ok(Some(loaded)) => {
                         self.stats.cached_files += 1;
                         self.warn_record(&loaded.session);
-                        records.push(self.decorate(loaded.session.clone()));
+                        let session = self.decorate(loaded.session.clone());
+                        emit_candidate(
+                            &session,
+                            Some(&loaded),
+                            self.request,
+                            progressive,
+                            observer,
+                        )?;
+                        records.push(session);
                         self.loaded.insert((Provider::Codex, key), loaded);
                         continue;
                     }
                     Ok(None) => {}
                     Err(e) => self
                         .warnings
-                        .push(format!("缓存记录不可用，回退到日志：{e}")),
+                        .push(format!("Cache record unavailable; reading logs: {e}")),
                 }
             }
             pending.push((path.clone(), db, signature));
         }
         let keep_messages = self.request.action == Action::Show;
-        let parsed: Vec<_> = self.pool.install(|| {
-            pending
-                .par_iter()
-                .map(|(path, db, signature)| {
-                    let result = parser::parse(path, db.as_ref(), header, full, keep_messages);
-                    let stable =
-                        cache::fingerprint(path, db.as_ref()).ok().as_ref() == Some(signature);
-                    (path, signature, result, stable)
-                })
-                .collect()
-        });
-        for (path, signature, result, stable) in parsed {
+        let parse = move |(path, db, signature): &(PathBuf, Option<DbMeta>, String)| {
+            let start = Instant::now();
+            let result = parser::parse(path, db.as_ref(), header, full, keep_messages);
+            let stable = cache::fingerprint(path, db.as_ref()).ok().as_ref() == Some(signature);
+            (
+                path.clone(),
+                signature.clone(),
+                result,
+                stable,
+                (start, Instant::now()),
+            )
+        };
+        // Receive completed files on the caller thread so a slow sibling does
+        // not delay the first match. The ordinary path retains ordered collect.
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let parsed: Box<dyn Iterator<Item = _>> = if progressive {
+            let count = pending.len();
+            for item in pending {
+                let sender = sender.clone();
+                self.pool.spawn(move || {
+                    let _ = sender.send(parse(&item));
+                });
+            }
+            drop(sender);
+            Box::new(receiver.into_iter().take(count))
+        } else {
+            let parsed: Vec<_> = self
+                .pool
+                .install(|| pending.par_iter().map(parse).collect());
+            Box::new(parsed.into_iter())
+        };
+        let mut read_intervals = Vec::new();
+        for (path, signature, result, stable, interval) in parsed {
+            read_intervals.push(interval);
             match result {
                 Ok(parsed) => {
                     if header {
@@ -239,7 +282,7 @@ impl Engine<'_> {
                     };
                     if !stable {
                         self.warnings.push(format!(
-                            "会话正在写入，结果为本次读取的快照：{}",
+                            "Session is being written; results reflect this read snapshot: {}",
                             loaded.session.id
                         ));
                     } else if self.cache.is_some() {
@@ -249,34 +292,48 @@ impl Engine<'_> {
                             loaded: loaded.clone(),
                         });
                     }
-                    records.push(self.decorate(loaded.session.clone()));
+                    let session = self.decorate(loaded.session.clone());
+                    emit_candidate(&session, Some(&loaded), self.request, progressive, observer)?;
+                    records.push(session);
                     self.loaded.insert((Provider::Codex, key), loaded);
                 }
                 Err(e) => self
                     .warnings
-                    .push(format!("无法读取正文 {}: {e}", path.display())),
+                    .push(format!("Cannot read body {}: {e}", path.display())),
             }
         }
-        records
+        let elapsed = union_ms(read_intervals);
+        if header {
+            self.stats.metadata_read_ms += elapsed;
+        } else {
+            self.stats.body_read_ms += elapsed;
+        }
+        Ok(records)
     }
 
-    fn hydrate(&mut self, sessions: &[Session], full: bool) -> Vec<Session> {
+    fn hydrate(
+        &mut self,
+        sessions: &[Session],
+        full: bool,
+        progressive: bool,
+        observer: &mut impl FnMut(Event<'_>) -> Result<()>,
+    ) -> Result<Vec<Session>> {
         let paths: Vec<_> = sessions
             .iter()
             .filter(|s| s.provider == Provider::Codex)
             .flat_map(|s| s.paths.iter().map(PathBuf::from))
             .collect();
-        let mut records = self.load(&paths, false, full);
+        let mut records = self.load(&paths, false, full, progressive, observer)?;
         for session in sessions.iter().filter(|s| s.provider != Provider::Codex) {
             records.push(self.decorate(session.clone()));
         }
-        records
+        Ok(records)
     }
 
     fn warn_record(&mut self, session: &Session) {
         if session.malformed_lines > 0 {
             self.warnings.push(format!(
-                "{}: 跳过 {} 行无效 JSON",
+                "{}: skipped {} invalid JSON lines",
                 session.id, session.malformed_lines
             ));
         }
@@ -343,10 +400,136 @@ fn sort(records: &mut [Session], order: Sort) {
     });
 }
 
+fn match_score(s: &Session, text: &str, query: &str, exact: bool) -> f64 {
+    let fields = [
+        &s.title,
+        &s.first_user_preview,
+        &s.last_reply_preview,
+        &s.id,
+    ]
+    .map(|s| normalize(s));
+    let score = score_normalized(
+        query,
+        &[&fields[0], &fields[1], &fields[2], &fields[3], text],
+        exact,
+    );
+    if score == 0.0 {
+        return 0.0;
+    }
+    let title_score = score_normalized(query, &[&fields[0]], exact);
+    ((score + title_score * 0.15) * 1000.0).round() / 1000.0
+}
+
+fn emit_candidate(
+    session: &Session,
+    loaded: Option<&Loaded>,
+    request: &Request,
+    progressive: bool,
+    observer: &mut impl FnMut(Event<'_>) -> Result<()>,
+) -> Result<()> {
+    if !progressive {
+        return Ok(());
+    }
+    let mut session = session.clone();
+    session.match_score = if request.query.is_empty() {
+        1.0
+    } else if let Some(text) = loaded.and_then(|l| l.search_text.as_deref()) {
+        match_score(
+            &session,
+            text,
+            &normalize(&request.query),
+            request.options.exact,
+        )
+    } else {
+        // Headers establish project precedence but are not keyword evidence.
+        0.0
+    };
+    observer(Event::Candidate { session: &session })
+}
+
+/// Provisional catalog: duplicate selection and project precedence can change
+/// as sources arrive. Use the same filters/order/page as the completed query.
+#[derive(Default)]
+pub struct LiveResults {
+    records: HashMap<(Provider, String), Session>,
+}
+
+impl LiveResults {
+    pub fn update(&mut self, session: &Session) {
+        self.records
+            .insert((session.provider, session.path.clone()), session.clone());
+    }
+
+    pub fn page(&self, request: &Request) -> (usize, Vec<Session>) {
+        let mut records = project::filter(
+            unique(self.records.values().cloned().collect()),
+            request.options.project.as_deref(),
+            request.options.exact,
+        );
+        records.retain(|s| {
+            s.match_score > 0.0
+                && in_time(s, request)
+                && (request.options.include_subagents
+                    || request.options.id.is_some()
+                    || !s.is_subagent)
+        });
+        sort(&mut records, request.options.sort);
+        let total = records.len();
+        let page = records
+            .into_iter()
+            .skip(request.options.offset as usize)
+            .take(request.options.limit as usize)
+            .collect();
+        (total, page)
+    }
+}
+
+pub enum Event<'a> {
+    Phase(&'static str),
+    /// A source record as it becomes readable; may replace an earlier copy.
+    Candidate {
+        session: &'a Session,
+    },
+    Results {
+        total: usize,
+        shown: usize,
+    },
+    Session {
+        index: usize,
+        session: &'a Session,
+    },
+}
+
 pub fn execute(request: &Request) -> Result<Output> {
+    execute_observed(request, &mut |_| Ok(()))
+}
+
+/// Results are emitted only after global filtering, sorting and pagination.
+/// The callback can flush each completed row before later snippets/cache writes.
+pub fn execute_observed(
+    request: &Request,
+    observer: &mut impl FnMut(Event<'_>) -> Result<()>,
+) -> Result<Output> {
+    execute_impl(request, observer, false)
+}
+
+/// Interactive discovery events precede the final globally selected page.
+pub fn execute_incremental(
+    request: &Request,
+    observer: &mut impl FnMut(Event<'_>) -> Result<()>,
+) -> Result<Output> {
+    execute_impl(request, observer, request.action == Action::Search)
+}
+
+fn execute_impl(
+    request: &Request,
+    observer: &mut impl FnMut(Event<'_>) -> Result<()>,
+    progressive: bool,
+) -> Result<Output> {
+    observer(Event::Phase("Reading session catalog"))?;
     if request.action == Action::Relations {
         if request.options.provider != Providers::Codex {
-            bail!("relations 当前只支持 --provider codex");
+            bail!("relations currently supports only --provider codex");
         }
         return crate::relations::execute(request);
     }
@@ -375,7 +558,7 @@ pub fn execute(request: &Request) -> Result<Output> {
     }
     all_paths.sort();
     if options.provider.codex() && all_paths.is_empty() {
-        warnings.push(format!("未找到 rollout 日志：{}", home.display()));
+        warnings.push(format!("No rollout logs found: {}", home.display()));
     }
     let database = if options.provider.codex() {
         catalog::database(&home, &mut warnings)
@@ -387,16 +570,20 @@ pub fn execute(request: &Request) -> Result<Output> {
     } else {
         HashMap::new()
     };
+    let metadata_read_ms = start.elapsed().as_secs_f64() * 1000.0;
+    let mut cache_read_ms = 0.0;
     let cache = if !options.provider.codex() || options.no_cache || options.id.is_some() {
         None
     } else {
-        match Cache::open(
-            &options.cache_dir.clone().unwrap_or_else(cache::directory),
-            &home,
-        ) {
+        match measure(&mut cache_read_ms, || {
+            Cache::open(
+                &options.cache_dir.clone().unwrap_or_else(cache::directory),
+                &home,
+            )
+        }) {
             Ok(c) => Some(c),
             Err(e) => {
-                warnings.push(format!("缓存不可用，回退到日志：{e}"));
+                warnings.push(format!("Cache unavailable; reading logs: {e}"));
                 None
             }
         }
@@ -427,6 +614,8 @@ pub fn execute(request: &Request) -> Result<Output> {
         stats: Stats {
             mode: mode.into(),
             total_files: all_paths.len(),
+            metadata_read_ms,
+            cache_read_ms,
             ..Default::default()
         },
         pool: rayon::ThreadPoolBuilder::new()
@@ -456,14 +645,19 @@ pub fn execute(request: &Request) -> Result<Output> {
     }
     let mut candidates = Vec::new();
     let trae = if options.provider.trae() {
+        observer(Event::Phase("Reading TRAE IDE data and index"))?;
         let mut source_options = options.clone();
         if request.action == Action::Sync {
             source_options.refresh = true;
         }
-        match crate::trae::Store::open(&source_options) {
+        match measure(&mut engine.stats.metadata_read_ms, || {
+            crate::trae::Store::open(&source_options)
+        }) {
             Ok(store) => Some(store),
             Err(error) if options.provider == Providers::All && !options.refresh => {
-                engine.warnings.push(format!("TRAE 来源不可用：{error}"));
+                engine
+                    .warnings
+                    .push(format!("TRAE source unavailable: {error}"));
                 None
             }
             Err(error) => return Err(error),
@@ -473,14 +667,28 @@ pub fn execute(request: &Request) -> Result<Output> {
     };
     if let Some(store) = &trae {
         if request.action == Action::Sync {
-            store.sync(options.id.as_deref())?;
+            measure(&mut engine.stats.body_read_ms, || {
+                store.sync(options.id.as_deref())
+            })?;
         }
         let mut read_options = options.clone();
         if request.action == Action::Sync {
             read_options.refresh = true;
         }
-        let loaded_records =
-            store.records(&read_options, &mut engine.stats, &mut engine.warnings)?;
+        let mut projects = HashMap::new();
+        let loaded_records = store.records_observed(
+            &read_options,
+            &mut engine.stats,
+            &mut engine.warnings,
+            &mut |loaded| {
+                if !progressive {
+                    return Ok(());
+                }
+                let mut session = loaded.session.clone();
+                session.project = project::resolve(&session, &mut projects);
+                emit_candidate(&session, Some(loaded), request, progressive, observer)
+            },
+        )?;
         if full && request.action == Action::Search {
             let queries_only = loaded_records
                 .iter()
@@ -496,12 +704,12 @@ pub fn execute(request: &Request) -> Result<Output> {
                 .count();
             if titled < partial_records.len() || queries_only > 0 {
                 let title_coverage = if titled == 0 {
-                    "TRAE 搜索未包含 IDE 会话标题".into()
+                    "TRAE search does not include IDE session titles".into()
                 } else {
-                    format!("TRAE 搜索包含 {titled} 个 IDE 会话标题")
+                    format!("TRAE search includes {titled} IDE session titles")
                 };
                 engine.warnings.push(format!(
-                    "{title_coverage}；{} 个会话中，{} 个仅有索引提问，{} 个包含已同步正文。{} 个会话缺少标题元数据，列表回退到首条提问或 ID",
+                    "{title_coverage}; of {} sessions, {} have only indexed queries and {} include synced bodies. {} sessions lack title metadata; lists fall back to the first query or ID",
                     partial_records.len(),
                     queries_only,
                     partial_records.len() - queries_only,
@@ -510,9 +718,9 @@ pub fn execute(request: &Request) -> Result<Output> {
             }
             if queries_only > 0 {
                 engine.warnings.push(if options.trae_index.is_some() {
-                    "TRAE 离线导出未覆盖全部正文，未命中不表示会话不存在".into()
+                    "TRAE offline exports do not cover all conversation text; a missing match does not imply a missing session".into()
                 } else {
-                    "可在 TRAE Agent 环境运行 sync --provider trae 补充正文；--refresh 只更新提问索引，不补充 IDE 标题".into()
+                    "Run sync --provider trae in the TRAE Agent environment to include bodies; --refresh updates only the query index, not IDE titles".into()
                 });
             }
         }
@@ -524,12 +732,15 @@ pub fn execute(request: &Request) -> Result<Output> {
         }
     }
     let traecli = if options.provider.traecli() {
-        match crate::traecli::Store::open(options, &mut engine.warnings) {
+        observer(Event::Phase("Reading TRAE CLI logs and index"))?;
+        match measure(&mut engine.stats.metadata_read_ms, || {
+            crate::traecli::Store::open(options, &mut engine.warnings)
+        }) {
             Ok(store) => Some(store),
             Err(error) if options.provider == Providers::All && !options.refresh => {
                 engine
                     .warnings
-                    .push(format!("TRAE CLI 来源不可用：{error}"));
+                    .push(format!("TRAE CLI source unavailable: {error}"));
                 None
             }
             Err(error) => return Err(error),
@@ -538,7 +749,20 @@ pub fn execute(request: &Request) -> Result<Output> {
         None
     };
     if let Some(store) = &traecli {
-        for loaded in store.records(options, &mut engine.stats, &mut engine.warnings)? {
+        let mut projects = HashMap::new();
+        for loaded in store.records_observed(
+            options,
+            &mut engine.stats,
+            &mut engine.warnings,
+            &mut |loaded| {
+                if !progressive {
+                    return Ok(());
+                }
+                let mut session = loaded.session.clone();
+                session.project = project::resolve(&session, &mut projects);
+                emit_candidate(&session, Some(loaded), request, progressive, observer)
+            },
+        )? {
             candidates.push(engine.decorate(loaded.session.clone()));
             engine
                 .loaded
@@ -546,13 +770,18 @@ pub fn execute(request: &Request) -> Result<Output> {
         }
     }
     let mut headers = Vec::new();
+    observer(Event::Phase("Reading Codex metadata"))?;
     let mut conflicting_copies = Vec::new();
     for (id, paths) in by_id {
         if let Some(db) = engine.database.get(&id).cloned() {
             for path in paths {
                 engine.stats.database_sessions += 1;
-                let session = parser::metadata(&path, &serde_json::Value::Null, Some(&db))?;
-                candidates.push(engine.decorate(session));
+                let session = measure(&mut engine.stats.metadata_read_ms, || {
+                    parser::metadata(&path, &serde_json::Value::Null, Some(&db))
+                })?;
+                let session = engine.decorate(session);
+                emit_candidate(&session, None, request, progressive, observer)?;
+                candidates.push(session);
             }
         } else if paths.len() > 1 {
             // A stale archived copy can belong to a different project/source.
@@ -562,8 +791,8 @@ pub fn execute(request: &Request) -> Result<Output> {
             headers.extend(paths);
         }
     }
-    candidates.extend(engine.load(&headers, true, false));
-    candidates.extend(engine.load(&conflicting_copies, false, full));
+    candidates.extend(engine.load(&headers, true, false, progressive, observer)?);
+    candidates.extend(engine.load(&conflicting_copies, false, full, progressive, observer)?);
     let candidates = unique(candidates);
     let candidates = project::filter(candidates, options.project.as_deref(), options.exact);
     let candidates = if request.action == Action::Projects {
@@ -582,6 +811,7 @@ pub fn execute(request: &Request) -> Result<Output> {
     }
     let mut records;
     let total;
+    observer(Event::Phase("Reading and matching candidate bodies"))?;
     if metadata_mode {
         for s in &mut candidates {
             s.match_score = 1.0;
@@ -595,10 +825,11 @@ pub fn execute(request: &Request) -> Result<Output> {
             .skip(options.offset as usize)
             .take(options.limit as usize)
             .collect();
-        let mut hydrated: HashMap<_, _> = unique(engine.hydrate(&page, false))
-            .into_iter()
-            .map(|s| ((s.provider, s.id.clone()), s))
-            .collect();
+        let mut hydrated: HashMap<_, _> =
+            unique(engine.hydrate(&page, false, progressive, observer)?)
+                .into_iter()
+                .map(|s| ((s.provider, s.id.clone()), s))
+                .collect();
         for mut candidate in page {
             if let Some(mut s) = hydrated.remove(&(candidate.provider, candidate.id.clone())) {
                 s.paths = candidate.paths;
@@ -610,7 +841,7 @@ pub fn execute(request: &Request) -> Result<Output> {
             }
         }
     } else {
-        records = unique(engine.hydrate(&candidates, full));
+        records = unique(engine.hydrate(&candidates, full, progressive, observer)?);
         engine.stats.indexed_sessions = records.len();
         records.retain(|s| in_time(s, request));
         let query = normalize(&request.query);
@@ -619,28 +850,15 @@ pub fn execute(request: &Request) -> Result<Output> {
                 records
                     .into_par_iter()
                     .filter_map(|mut s| {
-                        let fields = [
-                            &s.title,
-                            &s.first_user_preview,
-                            &s.last_reply_preview,
-                            &s.id,
-                        ]
-                        .map(|s| normalize(s));
                         let text = engine
                             .loaded
                             .get(&(s.provider, s.path.clone()))
                             .and_then(|l| l.search_text.as_deref())
                             .unwrap_or("");
-                        let score = score_normalized(
-                            &query,
-                            &[&fields[0], &fields[1], &fields[2], &fields[3], text],
-                            options.exact,
-                        );
-                        if score == 0.0 {
+                        s.match_score = match_score(&s, text, &query, options.exact);
+                        if s.match_score == 0.0 {
                             return None;
                         }
-                        let title_score = score_normalized(&query, &[&fields[0]], options.exact);
-                        s.match_score = ((score + title_score * 0.15) * 1000.0).round() / 1000.0;
                         Some(s)
                     })
                     .collect()
@@ -701,10 +919,13 @@ pub fn execute(request: &Request) -> Result<Output> {
     } else if request.action == Action::Show {
         if records.len() != 1 {
             if records.is_empty() {
-                bail!("没有找到本地会话：{}", options.id.as_deref().unwrap_or(""));
+                bail!(
+                    "No local session found: {}",
+                    options.id.as_deref().unwrap_or("")
+                );
             }
             bail!(
-                "ID 前缀匹配 {} 个会话，请指定完整 ID 或 --provider：\n{}",
+                "ID prefix matches {} sessions; specify a full ID or --provider:\n{}",
                 records.len(),
                 records
                     .iter()
@@ -715,10 +936,9 @@ pub fn execute(request: &Request) -> Result<Output> {
             );
         }
         if records[0].provider == Provider::Trae {
-            let parsed = trae
-                .as_ref()
-                .unwrap()
-                .show(&records[0].id, options.refresh)?;
+            let parsed = measure(&mut engine.stats.body_read_ms, || {
+                trae.as_ref().unwrap().show(&records[0].id, options.refresh)
+            })?;
             records[0] = engine.decorate(parsed.session);
             messages = parsed.messages;
             transcript_file = Some(
@@ -727,10 +947,12 @@ pub fn execute(request: &Request) -> Result<Output> {
                     &records[0],
                     &messages,
                 )
-                .context("无法生成 TRAE 临时对话文件")?,
+                .context("Cannot create temporary TRAE conversation file")?,
             );
         } else if records[0].provider == Provider::Traecli {
-            let parsed = traecli.as_ref().unwrap().show(&records[0].path)?;
+            let parsed = measure(&mut engine.stats.body_read_ms, || {
+                traecli.as_ref().unwrap().show(&records[0].path)
+            })?;
             records[0] = engine.decorate(parsed.session);
             messages = parsed.messages;
         } else {
@@ -749,25 +971,34 @@ pub fn execute(request: &Request) -> Result<Output> {
         }
         total
     };
-    if full && request.action == Action::Search {
-        for session in &mut records {
-            let messages = engine
-                .loaded
-                .get(&(session.provider, session.path.clone()))
-                .map(|l| l.search_messages.as_slice())
-                .unwrap_or_default();
-            session.matches =
-                crate::snippets::for_session(session, messages, &request.query, options.exact);
+    if request.action == Action::Search {
+        observer(Event::Results {
+            total,
+            shown: records.len(),
+        })?;
+        for (index, session) in records.iter_mut().enumerate() {
+            if full {
+                observer(Event::Phase("Generating result snippets"))?;
+                let messages = engine
+                    .loaded
+                    .get(&(session.provider, session.path.clone()))
+                    .map(|l| l.search_messages.as_slice())
+                    .unwrap_or_default();
+                session.matches =
+                    crate::snippets::for_session(session, messages, &request.query, options.exact);
+            }
+            observer(Event::Session { index, session })?;
         }
     }
+    observer(Event::Phase("Saving index cache"))?;
     if let Some(cache) = &mut engine.cache
         && let Err(e) = cache.save(&engine.writes, &all_paths)
     {
-        engine
-            .warnings
-            .push(format!("无法保存索引缓存，结果仍可用：{e}"));
+        engine.warnings.push(format!(
+            "Cannot save index cache; results remain available: {e}"
+        ));
     }
-    engine.stats.elapsed_ms = start.elapsed().as_millis();
+    engine.stats.finish(start);
     engine.warnings.sort();
     engine.warnings.dedup();
     Ok(Output {

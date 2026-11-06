@@ -69,6 +69,15 @@ Run `./session-finder` in a terminal to open the interactive browser. Use arrow 
 
 Results default to the latest assistant reply. Use `--sort created` for creation order or `--sort relevance` for the best text matches. Add `-n 20 --offset 20` to paginate. Subagent sessions are hidden unless you use `--include-subagents` or look them up by ID.
 
+Terminal results show full session IDs with clickable Codex links and optional
+[TRAE CN Agent links](docs/trae.md#opening-agent-conversations). Colors emphasize
+titles and matched text with purple highlights and deep pink session IDs,
+keeping timestamps in the terminal's default text color. Searches show matches as conversations are read,
+updating their order in the terminal. Slow queries display a
+loading phase and elapsed time. The completed page stays in normal scrollback.
+Use `--color never`, `--links never`, or `--no-progress` to disable these features.
+Redirected output and JSON remain free of automatic terminal decoration.
+
 ## Read and reuse results
 
 ```sh

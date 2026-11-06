@@ -31,7 +31,7 @@ fn private_directory(path: &Path) -> Result<()> {
     }
     ensure!(
         fs::symlink_metadata(path)?.file_type().is_dir(),
-        "临时输出目录不是普通目录：{}",
+        "Temporary output directory is not a regular directory: {}",
         path.display()
     );
     fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
@@ -44,7 +44,10 @@ fn identical(path: &Path, snapshot: &File) -> Result<bool> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
         Err(e) => return Err(e.into()),
     };
-    ensure!(metadata.is_file(), "临时输出路径不是普通文件");
+    ensure!(
+        metadata.is_file(),
+        "Temporary output path is not a regular file"
+    );
     if metadata.len() != snapshot.metadata()?.len() {
         return Ok(false);
     }
@@ -76,11 +79,11 @@ pub fn materialize(
                 .id
                 .bytes()
                 .all(|b| b.is_ascii_hexdigit() || b == b'-'),
-        "TRAE 会话 ID 不能用作文件名"
+        "TRAE conversation ID cannot be used as a filename"
     );
     let mut directory = std::env::temp_dir()
         .canonicalize()
-        .context("系统临时目录不可用")?;
+        .context("System temporary directory unavailable")?;
     let namespace = format!("{:x}", Sha256::digest(source_identity.as_bytes()));
     for component in ["session-finder", "trae", &namespace] {
         directory.push(component);
@@ -120,7 +123,7 @@ pub fn materialize(
         temporary
             .persist(&path)
             .map_err(|e| e.error)
-            .context("无法替换 TRAE 临时对话文件")?;
+            .context("Cannot replace temporary TRAE conversation file")?;
     }
     Ok(TranscriptFile {
         path,

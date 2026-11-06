@@ -30,6 +30,32 @@ Omitting `--provider` combines all three supported sources before shared filteri
 
 The default native database is `~/Library/Application Support/Trae CN/ModularData/ai-agent/database.db`, with `Trae` checked next. Override the database and matching native library with `--trae-db` and `--trae-library`. Explicit `--trae-ctx` or `--trae-index` selects the compatible snapshot path; when no native database is found, existing ContextFS discovery is also attempted.
 
+## Opening Agent conversations
+
+Native list results with a recorded absolute working directory have clickable
+conversation IDs in interactive terminals. This uses the optional local
+`session-finder.trae-session-link` extension, tested with TRAE CN 3.4.15 on macOS.
+Install the experimental bridge once from a source checkout:
+
+```sh
+python3 scripts/trae-session-link.py --install
+./session-finder recent --provider trae
+```
+
+An external URI first reaches an IDE extension host, then hands the conversation
+to the current **Agent** window. The full conversation ID and recorded working
+directory are encoded in the link. TRAE must be signed in to the owning account
+and the project directory must still exist locally. The first click can show a
+URI permission dialog; an extension update may require **Developer: Reload
+Window** in the IDE window.
+
+The bridge uses an internal API and covers local `chat-core` conversations;
+classic IDE-format and SSH conversations are not verified. A failed handoff
+is reported in TRAE. This is separate from the `context://history/<ID>` source
+locator kept in JSON `nativeUrl`, whose meaning remains unchanged. Normal
+queries only print links and never launch applications. See the
+[bridge instructions](../scripts/trae-session-link-extension/README.md).
+
 ## Conversation files
 
 `show` creates a file only for the selected IDE conversation, including when it is selected through `--provider all`. Plain stdout contains just the absolute path; diagnostics remain on stderr. Search, recent, and project queries do not create conversation exports.

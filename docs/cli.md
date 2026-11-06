@@ -40,6 +40,46 @@ The default sort is `replied`. Use `created` for creation time or `relevance` fo
 
 Subagents are hidden by default. Use `--include-subagents` or an ID lookup to include them. Ordinary forks remain visible.
 
+## Terminal presentation
+
+Each list row shows its complete conversation ID as `Session ID: <ID>`.
+In a terminal, supported IDs are OSC 8 hyperlinks: Codex opens
+`codex://threads/<UUID>`; native TRAE results with a recorded absolute working
+directory use the [TRAE CN Agent bridge](trae.md#opening-agent-conversations).
+TRAE CLI and snapshots without a verified app navigation path remain plain IDs.
+Click or Cmd-click according to your terminal. The target app/bridge must be
+installed; emitting a link does not launch the app or verify that it opened.
+
+Colors emphasize titles, providers, IDs, and the first matching span for each
+query term in displayed titles/snippets. Highlighting uses the same normalized,
+typo-tolerant and Chinese-gap matching rules as search. Matches use bold purple,
+providers and IDs use deep pink, and timestamps keep the terminal's default text color.
+`--color auto|always|never` and `--links auto|always|never` control decoration;
+both default to `auto`, disabled on redirected stdout and `TERM=dumb`.
+`NO_COLOR` disables automatic colors; explicit `--color always` overrides it.
+JSON stays undecorated even with `always`.
+
+Slow interactive queries show a stderr status line with the current read/match
+phase and elapsed time. Fast queries do not flash a status line. `--no-progress`
+disables it; JSON and redirected output never show it. The line clears before
+results or errors and does not replace the final query timing.
+
+Terminal searches show matches while individual conversations are
+read, including cached records. The temporary screen updates at most every
+50 ms and reorders the current page using the selected sort; a later, stronger
+match moves upward with `--sort relevance`. Counts, duplicate selection, and
+project filtering remain provisional until all sources have been checked.
+Catalog discovery and source opening still precede the first result. A single
+conversation is fully read before its match is shown.
+
+The temporary list fits the terminal height. On completion it is replaced by the
+full final page, with original-text snippets, in normal scrollback.
+`--no-progress` disables the spinner but retains incremental results.
+`TERM=dumb`, pipes, and JSON keep a complete response without redraws.
+
+CLI labels, loading phases, timings, help, and diagnostics are in English.
+Conversation titles, snippets, and messages retain their original language.
+
 ## Time boundaries
 
 - `--since` includes its starting instant.
@@ -52,7 +92,7 @@ The latest reply is the time of actual visible assistant text, including progres
 
 ## IDs and conversation output
 
-Use a complete UUID, a supported TRAE conversation ID, a prefix of at least eight characters, or a link containing a UUID. `--id` filters lists; `show` and `relations` require an unambiguous match.
+Use a complete UUID, a supported TRAE conversation ID, a prefix of at least eight characters, a Codex link, a `context://history/<ID>` locator, or the generated TRAE Agent bridge link. `--id` filters lists; `show` and `relations` require an unambiguous match.
 
 ```sh
 ./session-finder --id <ID-prefix> --json
@@ -143,6 +183,17 @@ Messages contain `role`, `text`, `timestamp`, `phase`, and `id`. Project entries
 `stats.mode` is `metadata`, `summary`, `full`, or `relations`. `parsedFiles` counts body parses; `headerFiles` counts header scans, including inherited prefixes and failed attempts; `cachedFiles` counts cache hits. In normal queries, candidate session/file counts reflect project/subagent selection. In relationship queries they describe the returned graph's nodes/logs, and `indexedSessions` is the returned node count.
 
 Plain-text and interactive output include query timing on stderr. JSON retains `stats.elapsedMs`; `--timings` also prints timing to stderr. That value measures query/cache work rather than total process startup or time waiting for interactive input.
+
+The footer includes milliseconds alongside each read count. JSON exposes
+`bodyReadMs`, `metadataReadMs`, `cacheReadMs`, and `otherMs` in `stats`.
+Body time covers log parsing and provider conversation conversion. Metadata time
+covers source discovery/catalogs and header scans; the metadata count still
+counts rollout headers, so a zero count can have nonzero catalog time.
+Cache time covers derived-cache setup and lookups, including misses; the count
+reports successful hits. Parallel read intervals are merged so overlapping
+workers are counted once. Other time covers remaining query work, including
+filtering, scoring, snippets, cache writes, and incremental presentation.
+Times are displayed to one decimal place; `elapsedMs` retains its integer form.
 
 ## Cache controls and local data
 

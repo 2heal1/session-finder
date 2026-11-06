@@ -92,7 +92,7 @@ pub fn resolve(session: &Session, memo: &mut HashMap<String, Project>) -> Projec
                 .and_then(|p| Path::new(p).file_name())
                 .map(|s| s.to_string_lossy().into_owned())
         })
-        .unwrap_or_else(|| "(无 project)".into());
+        .unwrap_or_else(|| "(no project)".into());
     let root = root
         .map(|s| s.to_string_lossy().into_owned())
         .or_else(|| session.cwd.clone());

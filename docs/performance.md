@@ -62,6 +62,13 @@ Cross-version comparison fills missing legacy Codex fields with `provider=codex`
 
 Wall time includes launching the process and serializing JSON. `stats.elapsedMs` measures query/cache work. Terminal timing likewise excludes process startup and interactive waiting.
 
+Read timing fields separate body conversion/parsing, metadata discovery/headers,
+and derived-cache setup/lookups. Parallel read intervals count their combined
+wall time, not the sum of worker durations. `otherMs` contains the remaining
+query work, including cache writes and presentation callbacks. These timings
+are additive diagnostics; benchmark gates still use total wall time and read
+counts. See the [statistics contract](cli.md#json-interface).
+
 PRs compare against the target branch's base SHA; main pushes use the preceding SHA. Release tags fall back to the parent commit when no usable previous SHA exists. A base without `Cargo.toml` is explicitly reported as bootstrap. A Rust baseline that fails to build is an error, not a reason to skip comparison.
 
 Review budget changes with a rationale and report. Intentional query changes must update synthetic expectations and explain any baseline difference. Repository branch rules must require `Tests and performance` and `Validate npm package` if failing checks should block a merge.

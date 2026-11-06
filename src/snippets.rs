@@ -30,6 +30,32 @@ fn offsets(original: &str) -> Vec<(usize, usize)> {
     map
 }
 
+/// Original grapheme ranges for terminal highlighting, using search semantics.
+pub(crate) fn highlight_ranges(original: &str, query: &str, exact: bool) -> Vec<Range<usize>> {
+    let normalized = normalize(original);
+    let query = normalize(query);
+    let map = offsets(original);
+    let mut ranges: Vec<Range<usize>> = query
+        .split_whitespace()
+        .filter_map(|term| {
+            let (_, span) = matching_span(term, &normalized, exact)?;
+            Some(map.get(span.start)?.0..map.get(span.end - 1)?.1)
+        })
+        .collect();
+    ranges.sort_by_key(|r| r.start);
+    let mut merged: Vec<Range<usize>> = Vec::new();
+    for range in ranges {
+        if let Some(previous) = merged.last_mut()
+            && range.start <= previous.end
+        {
+            previous.end = previous.end.max(range.end);
+        } else {
+            merged.push(range);
+        }
+    }
+    merged
+}
+
 fn excerpt(original: &str, span: Range<usize>) -> String {
     let context = (WIDTH - 2)
         .saturating_sub(original[span.clone()].chars().count())

@@ -335,7 +335,7 @@ fn show_does_not_truncate_messages_and_prefix_ambiguity_fails() {
     assert!(
         execute(&f.req(&["show", "01000000"]))
             .unwrap_err_string()
-            .contains("匹配 2")
+            .contains("matches 2")
     );
     assert_eq!(f.run(&["--id", "01000000"]).total, 2);
 }
@@ -481,7 +481,7 @@ fn compact_lists_verbose_metadata_and_original_hits_share_results() {
     assert!(
         String::from_utf8(output.stdout)
             .unwrap()
-            .contains("↳ 助手：")
+            .contains("↳ Assistant:")
     );
     let show_req = f.req(&["show", A, "--json"]);
     let shown = execute(&show_req).unwrap().json(&show_req);
@@ -790,7 +790,7 @@ fn incompatible_database_falls_back_and_newest_compatible_is_used() {
         f.run(&["recent"])
             .warnings
             .iter()
-            .any(|w| w.contains("回退"))
+            .any(|w| w.contains("reading logs"))
     );
     let db = f.db();
     db_row(&db, A, "/database", "vscode", 1793491200);
@@ -809,7 +809,7 @@ fn cache_unavailable_does_not_prevent_results_and_no_cache_creates_nothing() {
     fs::write(f.root().join("cache"), "not a directory").unwrap();
     let out = f.run(&["recent"]);
     assert_eq!(out.total, 1);
-    assert!(out.warnings.iter().any(|w| w.contains("缓存")));
+    assert!(out.warnings.iter().any(|w| w.contains("Cache")));
 }
 
 #[test]

@@ -50,64 +50,81 @@ impl Providers {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, ValueEnum)]
+pub enum Decoration {
+    #[default]
+    Auto,
+    Always,
+    Never,
+}
+
 #[derive(Clone, Debug, Default, Args)]
 pub struct Options {
     // Resolved by Request::new; Cli keeps omission distinct from explicit `all`.
     #[arg(skip)]
     pub provider: Providers,
-    /// TRAE IDE 内 ctx-cli 的路径，用于选择应用；读取直接使用 Rust IPC
+    /// TRAE IDE ctx-cli path for application selection; reads use native Rust IPC
     #[arg(long, global = true)]
     pub trae_ctx: Option<PathBuf>,
-    /// 离线导出的 TRAE 索引 JSONL 或已有查询快照
+    /// Offline TRAE index JSONL export or existing query snapshot
     #[arg(long, global = true)]
     pub trae_index: Option<PathBuf>,
-    /// TRAE IDE 原生 database.db 路径（默认自动发现）
+    /// Native TRAE IDE database.db path (auto-discovered by default)
     #[arg(long, global = true, conflicts_with_all = ["trae_index", "trae_ctx"])]
     pub trae_db: Option<PathBuf>,
-    /// 与原生数据库对应的 libai_agent.dylib 路径
+    /// libai_agent.dylib path matching the native database
     #[arg(long, global = true, conflicts_with_all = ["trae_index", "trae_ctx"])]
     pub trae_library: Option<PathBuf>,
-    /// TRAE CLI 私有目录；默认 TRAECLI_HOME、TRAE_HOME/cli 或 ~/.trae/cli
+    /// TRAE CLI data directory; defaults to TRAECLI_HOME, TRAE_HOME/cli, or ~/.trae/cli
     #[arg(long, global = true)]
     pub traecli_home: Option<PathBuf>,
-    /// 项目名、仓库 URL 或 worktree 路径
+    /// Project name, repository URL, or worktree path
     #[arg(short, long, global = true)]
     pub project: Option<String>,
-    /// UUID、TRAE conversation ID、至少 8 位前缀或会话链接
+    /// UUID, TRAE conversation ID, prefix of at least 8 characters, or session link
     #[arg(long, global = true)]
     pub id: Option<String>,
     #[arg(long, value_enum, default_value = "replied", global = true)]
     pub sort: Sort,
-    /// 起点：YYYY-MM-DD、ISO 时间、7d、24h、now
+    /// Start: YYYY-MM-DD, ISO timestamp, 7d, 24h, or now
     #[arg(long, global = true)]
     pub since: Option<String>,
-    /// 终点（ISO 时间不包含边界；纯日期包含当天）
+    /// End: exclusive for ISO timestamps, inclusive for calendar dates
     #[arg(long, global = true)]
     pub until: Option<String>,
     #[arg(short = 'n', long, default_value_t = 10, value_parser = clap::value_parser!(u32).range(1..=10000), global = true)]
     pub limit: u32,
-    /// 跳过前 N 条结果，用于分页
+    /// Skip the first N results for pagination
     #[arg(long, default_value_t = 0, global = true)]
     pub offset: u32,
     #[arg(long, global = true)]
     pub include_subagents: bool,
-    /// 关闭英文拼写和中文跳字容错
+    /// Disable English typo tolerance and Chinese character-gap matching
     #[arg(long, global = true)]
     pub exact: bool,
     #[arg(long, global = true)]
     pub json: bool,
-    /// recent / search JSON 包含完整会话元数据
+    /// Include full session metadata in recent / search JSON lists
     #[arg(long, global = true, requires = "json")]
     pub verbose: bool,
-    /// 同时向 stderr 输出查询耗时（普通文本及交互菜单默认显示）
+    /// Also print query timing to stderr (shown by default for text and interactive output)
     #[arg(long, global = true)]
     pub timings: bool,
-    /// 默认 CODEX_HOME 或 ~/.codex
+    /// Terminal colors; auto respects NO_COLOR and disables colors on redirected output
+    #[arg(long, value_enum, default_value = "auto", global = true)]
+    pub color: Decoration,
+    /// OSC 8 links on session IDs; auto enables links only in terminals
+    #[arg(long, value_enum, default_value = "auto", global = true)]
+    pub links: Decoration,
+    /// Disable the terminal loading status (final query timing is still shown)
+    #[arg(long, global = true)]
+    pub no_progress: bool,
+    /// Defaults to CODEX_HOME or ~/.codex
     #[arg(long, global = true)]
     pub home: Option<PathBuf>,
     #[arg(long, global = true)]
     pub cache_dir: Option<PathBuf>,
-    /// 重新读取本次查询涉及的日志
+    /// Reread the logs involved in this query
     #[arg(long, global = true)]
     pub refresh: bool,
     #[arg(long, global = true)]
@@ -116,42 +133,42 @@ pub struct Options {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
-    /// 同步 TRAE 索引中所选会话的用户/助手正文到本地快照
+    /// Sync user/assistant text for selected TRAE indexed conversations to local snapshots
     Sync,
-    /// 搜索标题及全部用户/助手文本
+    /// Search titles and all user/assistant text
     Search { query: Vec<String> },
-    /// 最近会话；可附带关键词
+    /// Recent sessions, optionally filtered by keywords
     Recent { query: Vec<String> },
-    /// 查看对话；TRAE IDE 生成临时 JSONL 并返回路径，Codex/TRAE CLI 输出正文
+    /// Show a conversation; TRAE IDE returns a temporary JSONL path, Codex/TRAE CLI print text
     Show {
         #[arg(id = "session", value_name = "ID")]
         id: Option<String>,
     },
-    /// 查询父会话、fork 和子代理关系（包含子代理，不分页）
+    /// Inspect parent, fork, and subagent relationships (includes subagents, no pagination)
     #[command(visible_alias = "related")]
     Relations {
         #[arg(id = "session", value_name = "ID")]
         id: Option<String>,
-        /// 向上或向下最多追溯的边数
+        /// Maximum number of edges to traverse upward or downward
         #[arg(long, default_value_t = 1, value_parser = clap::value_parser!(u32).range(1..=100))]
         depth: u32,
         #[arg(long, value_enum, default_value = "both")]
         direction: Direction,
     },
-    /// 项目列表和会话数
+    /// List projects and session counts
     Projects { query: Vec<String> },
-    /// 终端菜单：项目、搜索、会话选择
+    /// Terminal menu for projects, search, and session selection
     Browse,
 }
 
 #[derive(Debug, Parser)]
 #[command(
     version,
-    about = "本地 Codex / TRAE IDE / TRAE CLI 会话检索 · Rust CLI",
-    after_help = "示例：\n  session-finder recent --sort created\n  session-finder recent -p threadline --since 7d\n  session-finder search \"modren federation\"\n  session-finder search \"thredline\" --provider all --sort relevance\n  session-finder sync --provider trae --id <conversation_id>\n  session-finder show <UUID或前缀> --json\n  session-finder relations <UUID或前缀> --depth 3 --json\n  session-finder browse\n\n直接运行（终端内）进入交互菜单。仅读取来源数据；TRAE 默认读取本机原生数据库，支持普通终端。显式 ContextFS 来源刷新/同步需要 Agent IPC 环境。"
+    about = "Local Codex / TRAE IDE / TRAE CLI session search · Rust CLI",
+    after_help = "Examples:\n  session-finder recent --sort created\n  session-finder recent -p threadline --since 7d\n  session-finder search \"modren federation\"\n  session-finder search \"thredline\" --provider all --sort relevance\n  session-finder sync --provider trae --id <conversation_id>\n  session-finder show <UUID-or-prefix> --json\n  session-finder relations <UUID-or-prefix> --depth 3 --json\n  session-finder browse\n\nRun without arguments in a terminal to open the interactive menu. Source data stays read-only. TRAE reads the local native database by default and works in ordinary terminals. Explicit ContextFS refresh/sync operations require the Agent IPC environment."
 )]
 pub struct Cli {
-    /// 会话来源：默认 all；relations 默认 codex，sync 需指定 trae
+    /// Session provider: defaults to all; relations defaults to codex, sync requires trae
     #[arg(long, value_enum, global = true)]
     pub provider: Option<Providers>,
     #[command(flatten)]
@@ -197,7 +214,7 @@ impl Request {
         let (action, mut query) = match cli.command {
             Some(Command::Sync) => {
                 if options.provider != Providers::Trae {
-                    bail!("sync 当前支持 --provider trae");
+                    bail!("sync currently supports --provider trae");
                 }
                 if options.project.is_some()
                     || options.since.is_some()
@@ -205,7 +222,9 @@ impl Request {
                     || options.offset != 0
                     || options.limit != 10
                 {
-                    bail!("sync 使用 --id 选择会话，不接受项目、时间或分页过滤");
+                    bail!(
+                        "sync selects sessions with --id; project, time, and pagination filters are not supported"
+                    );
                 }
                 (Action::Sync, String::new())
             }
@@ -218,41 +237,45 @@ impl Request {
                 direction = requested_direction;
                 if let Some(id) = id {
                     let parsed = session_id(&id)
-                        .ok_or_else(|| anyhow::anyhow!("relations 需要有效的 session ID"))?;
+                        .ok_or_else(|| anyhow::anyhow!("relations requires a valid session ID"))?;
                     if let Some(flag) = &options.id
                         && session_id(flag).as_deref() != Some(&parsed)
                     {
-                        bail!("会话 ID 参数冲突");
+                        bail!("Conflicting session ID arguments");
                     }
                     options.id = Some(parsed);
                 }
                 if options.id.is_none() {
-                    bail!("relations 需要 session ID");
+                    bail!("relations requires a session ID");
                 }
                 if options.project.is_some() || options.since.is_some() || options.until.is_some() {
-                    bail!("relations 按关系查询，不接受 project 或时间过滤");
+                    bail!(
+                        "relations queries relationships; project and time filters are not supported"
+                    );
                 }
                 if options.offset != 0 || options.limit != 10 {
-                    bail!("relations 不分页，请使用 --depth 和 --direction 控制范围");
+                    bail!(
+                        "relations does not paginate; use --depth and --direction to control traversal"
+                    );
                 }
                 (Action::Relations, String::new())
             }
             Some(Command::Show { id }) => {
                 if let Some(id) = id {
                     let parsed = session_id(&id)
-                        .ok_or_else(|| anyhow::anyhow!("show 需要有效的 session ID"))?;
+                        .ok_or_else(|| anyhow::anyhow!("show requires a valid session ID"))?;
                     if let Some(flag) = &options.id
                         && session_id(flag).as_deref() != Some(&parsed)
                     {
-                        bail!("会话 ID 参数冲突");
+                        bail!("Conflicting session ID arguments");
                     }
                     options.id = Some(parsed);
                 }
                 if options.id.is_none() {
-                    bail!("show 需要 session ID");
+                    bail!("show requires a session ID");
                 }
                 if options.project.is_some() || options.since.is_some() || options.until.is_some() {
-                    bail!("show 按 ID 读取，不接受 project 或时间过滤");
+                    bail!("show reads by ID; project and time filters are not supported");
                 }
                 (Action::Show, String::new())
             }
@@ -272,16 +295,19 @@ impl Request {
             query.clear();
         }
         if let Some(id) = &options.id {
-            options.id = Some(
-                session_id(id)
-                    .ok_or_else(|| anyhow::anyhow!("ID 需要 UUID、至少 8 位前缀或会话链接"))?,
-            );
+            options.id = Some(session_id(id).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "ID requires a UUID, prefix of at least 8 characters, or session link"
+                )
+            })?);
         }
         if action == Action::Projects && options.id.is_some() {
-            bail!("projects 不接受 session ID");
+            bail!("projects does not accept a session ID");
         }
         if action == Action::Relations && options.provider != Providers::Codex {
-            bail!("relations 当前只支持 --provider codex；TRAE 轮次 ID 不是子会话关系");
+            bail!(
+                "relations currently supports only --provider codex; TRAE turn IDs do not establish sub-session relationships"
+            );
         }
         if !options.provider.trae()
             && (options.trae_ctx.is_some()
@@ -289,25 +315,25 @@ impl Request {
                 || options.trae_db.is_some()
                 || options.trae_library.is_some())
         {
-            bail!("TRAE 参数需要 --provider trae 或 all");
+            bail!("TRAE options require --provider trae or all");
         }
         if !options.provider.traecli() && options.traecli_home.is_some() {
-            bail!("--traecli-home 需要 --provider traecli 或 all");
+            bail!("--traecli-home requires --provider traecli or all");
         }
         if action == Action::Browse && options.json {
-            bail!("交互菜单不支持 --json，请使用 recent / search / show");
+            bail!("The interactive menu does not support --json; use recent / search / show");
         }
         if options.verbose && action != Action::Search {
-            bail!("--verbose 仅用于 recent / search 的 --json 列表");
+            bail!("--verbose is supported only for recent / search --json lists");
         }
         let now = chrono::Utc::now().timestamp_millis();
         let since = boundary(options.since.as_deref(), false, now)?;
         let until = boundary(options.until.as_deref(), true, now)?;
         if since.zip(until).is_some_and(|(a, b)| a >= b) {
-            bail!("--since 必须早于 --until");
+            bail!("--since must be earlier than --until");
         }
         if options.sort == Sort::Relevance && (since.is_some() || until.is_some()) {
-            bail!("时间范围需搭配 --sort created 或 replied");
+            bail!("Time filters require --sort created or replied");
         }
         Ok(Self {
             options,

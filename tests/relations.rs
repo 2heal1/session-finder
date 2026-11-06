@@ -470,7 +470,7 @@ fn prefix_ambiguity_alias_and_argument_validation() {
         .err()
         .unwrap()
         .to_string();
-    assert!(err.contains("匹配 2"));
+    assert!(err.contains("matches 2"));
     assert_eq!(
         f.graph(&["related", "--id", &format!("codex://threads/{A}")])["rootId"],
         A

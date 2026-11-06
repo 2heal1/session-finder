@@ -30,7 +30,7 @@ pub fn metadata(path: &Path, meta: &Value, db: Option<&DbMeta>) -> Result<Sessio
         .or_else(|| meta["id"].as_str().and_then(session_id))
         .or_else(|| meta["session_id"].as_str().and_then(session_id));
     let Some(id) = id.filter(|id| id.len() == 36) else {
-        bail!("没有有效的 session UUID")
+        bail!("No valid session UUID")
     };
     let own_meta = file_id.is_none()
         || meta
@@ -245,7 +245,7 @@ fn parse_impl(
     keep_messages: bool,
     traecli: bool,
 ) -> Result<Parsed> {
-    let file = File::open(path).with_context(|| format!("读取 {}", path.display()))?;
+    let file = File::open(path).with_context(|| format!("Reading {}", path.display()))?;
     let input: Box<dyn Read> = if path.extension().is_some_and(|e| e == "zst") {
         Box::new(zstd::stream::read::Decoder::new(file)?)
     } else {

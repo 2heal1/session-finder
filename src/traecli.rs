@@ -6,7 +6,7 @@ use crate::{
     model::{DbMeta, Message, Parsed, Provider, Session, Stats},
     parser,
     text::session_id,
-    time::{iso, millis_iso},
+    time::{iso, measure, millis_iso},
 };
 use anyhow::{Context, Result, bail, ensure};
 use serde_json::{Value, json};
@@ -38,14 +38,17 @@ impl Store {
                     .join("cli")
             });
         let home = fs::canonicalize(&home)
-            .with_context(|| format!("无法读取 TRAE CLI 目录 {}", home.display()))?;
-        ensure!(home.is_dir(), "TRAE CLI 来源必须是目录");
+            .with_context(|| format!("Cannot read TRAE CLI directory {}", home.display()))?;
+        ensure!(home.is_dir(), "TRAE CLI source must be a directory");
         let mut paths = Vec::new();
         catalog::walk(&home.join("sessions"), &mut paths, warnings);
         catalog::walk(&home.join("archived_sessions"), &mut paths, warnings);
         paths.sort();
         if paths.is_empty() {
-            warnings.push(format!("未找到 TRAE CLI rollout 日志：{}", home.display()));
+            warnings.push(format!(
+                "No TRAE CLI rollout logs found: {}",
+                home.display()
+            ));
         }
         let database = catalog::database(&home, warnings);
         let titles = catalog::titles(&home, warnings);
@@ -98,17 +101,29 @@ impl Store {
         stats: &mut Stats,
         warnings: &mut Vec<String>,
     ) -> Result<Vec<Loaded>> {
+        self.records_observed(options, stats, warnings, &mut |_| Ok(()))
+    }
+
+    pub fn records_observed(
+        &self,
+        options: &Options,
+        stats: &mut Stats,
+        warnings: &mut Vec<String>,
+        observer: &mut impl FnMut(&Loaded) -> Result<()>,
+    ) -> Result<Vec<Loaded>> {
         stats.total_files += self.paths.len();
         let mut cache = if options.no_cache {
             None
         } else {
-            match Cache::open(
-                &options.cache_dir.clone().unwrap_or_else(cache::directory),
-                &self.home.join(SCHEMA),
-            ) {
+            match measure(&mut stats.cache_read_ms, || {
+                Cache::open(
+                    &options.cache_dir.clone().unwrap_or_else(cache::directory),
+                    &self.home.join(SCHEMA),
+                )
+            }) {
                 Ok(cache) => Some(cache),
                 Err(e) => {
-                    warnings.push(format!("TRAE CLI 缓存不可用，回退到日志：{e}"));
+                    warnings.push(format!("TRAE CLI cache unavailable; reading logs: {e}"));
                     None
                 }
             }
@@ -132,17 +147,19 @@ impl Store {
             let signature = match cache::fingerprint(path, db) {
                 Ok(s) => s,
                 Err(e) => {
-                    warnings.push(format!("TRAE CLI 无法读取 {}：{e}", path.display()));
+                    warnings.push(format!("TRAE CLI cannot read {}: {e}", path.display()));
                     continue;
                 }
             };
             let cached = if !options.refresh
                 && let Some(cache) = &cache
             {
-                match cache.read(&key, &signature, false, true) {
+                match measure(&mut stats.cache_read_ms, || {
+                    cache.read(&key, &signature, false, true)
+                }) {
                     Ok(v) => v,
                     Err(e) => {
-                        warnings.push(format!("TRAE CLI 缓存记录不可用：{e}"));
+                        warnings.push(format!("TRAE CLI cache record unavailable: {e}"));
                         None
                     }
                 }
@@ -153,10 +170,12 @@ impl Store {
                 stats.cached_files += 1;
                 loaded
             } else {
-                let parsed = match parser::parse_traecli(path, db, true, false) {
+                let parsed = match measure(&mut stats.body_read_ms, || {
+                    parser::parse_traecli(path, db, true, false)
+                }) {
                     Ok(p) => p,
                     Err(e) => {
-                        warnings.push(format!("无法读取 TRAE CLI 正文 {}：{e}", path.display()));
+                        warnings.push(format!("Cannot read TRAE CLI body {}: {e}", path.display()));
                         continue;
                     }
                 };
@@ -175,7 +194,7 @@ impl Store {
                     });
                 } else {
                     warnings.push(format!(
-                        "TRAE CLI 会话正在写入，未缓存本次快照：{}",
+                        "TRAE CLI session is being written; this snapshot was not cached: {}",
                         loaded.session.id
                     ));
                 }
@@ -184,16 +203,19 @@ impl Store {
             self.decorate(&mut loaded.session);
             if loaded.session.malformed_lines > 0 {
                 warnings.push(format!(
-                    "{}: 跳过 {} 行无效 JSON",
+                    "{}: skipped {} invalid JSON lines",
                     loaded.session.id, loaded.session.malformed_lines
                 ));
             }
+            observer(&loaded)?;
             records.push(loaded);
         }
         if let Some(cache) = &mut cache
             && let Err(e) = cache.save(&writes, &self.paths)
         {
-            warnings.push(format!("TRAE CLI 缓存保存失败，结果仍可用：{e}"));
+            warnings.push(format!(
+                "TRAE CLI cache save failed; results remain available: {e}"
+            ));
         }
         Ok(records)
     }
@@ -202,7 +224,7 @@ impl Store {
         let path = Path::new(path);
         ensure!(
             self.paths.iter().any(|p| p == path),
-            "未找到 TRAE CLI rollout"
+            "TRAE CLI rollout not found"
         );
         let mut parsed = parser::parse_traecli(path, self.metadata(path), false, true)?;
         self.decorate(&mut parsed.session);
@@ -273,7 +295,10 @@ impl Transcript {
                 self.rollback(count);
             }
         } else if record["type"] == "history_mutation" {
-            ensure!(p["version"] == 1, "不支持的 TRAE CLI history_mutation 版本");
+            ensure!(
+                p["version"] == 1,
+                "Unsupported TRAE CLI history_mutation version"
+            );
             match p["operation"].as_str() {
                 Some("append") => {
                     self.rollback_event = None;
@@ -326,18 +351,18 @@ impl Transcript {
                 Some("rollback") => {
                     let count = p["num_turns"].as_u64().unwrap_or(0);
                     if let Some(target) = p["target_commit_id"].as_str() {
-                        let target_line = self
-                            .commits
-                            .get(target)
-                            .copied()
-                            .context("TRAE CLI rollback 的目标 commit 不在本地日志中")?;
+                        let target_line = self.commits.get(target).copied().context(
+                            "TRAE CLI rollback target commit is missing from local logs",
+                        )?;
                         self.truncate(target_line.saturating_add(1));
                     } else {
                         self.rollback(count);
                     }
                     self.rollback_event = Some(count);
                 }
-                _ => bail!("不支持的 TRAE CLI history_mutation 操作，未索引此会话"),
+                _ => bail!(
+                    "Unsupported TRAE CLI history_mutation operation; session was not indexed"
+                ),
             }
             if let Some(commit) = p["commit_id"].as_str() {
                 self.commits.insert(commit.into(), line);

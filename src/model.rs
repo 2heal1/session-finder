@@ -88,6 +88,34 @@ pub struct Session {
 }
 
 impl Session {
+    /// External application navigation, distinct from a source ContextFS URI.
+    /// Keep source locators and the existing JSON nativeUrl contract intact.
+    pub fn open_url(&self) -> Option<String> {
+        let id = crate::text::session_id(&self.id)?;
+        if id != self.id.to_ascii_lowercase() {
+            return None;
+        }
+        match self.provider {
+            Provider::Codex if id.len() == 36 => Some(format!("codex://threads/{id}")),
+            Provider::Trae
+                if id.len() == 24 && self.index_source.as_deref() == Some("native_database") =>
+            {
+                let cwd = self.cwd.as_deref()?;
+                if !std::path::Path::new(cwd).is_absolute() || crate::text::safe(cwd, false) != cwd
+                {
+                    return None;
+                }
+                let mut url =
+                    url::Url::parse("trae-cn://session-finder.trae-session-link/open").ok()?;
+                url.query_pairs_mut()
+                    .append_pair("id", &id)
+                    .append_pair("cwd", cwd);
+                Some(url.into())
+            }
+            _ => None,
+        }
+    }
+
     pub fn public(&self) -> serde_json::Value {
         let mut value = serde_json::to_value(self).expect("session is serializable");
         value.as_object_mut().unwrap().remove("repositoryUrl");
@@ -168,6 +196,22 @@ pub struct Stats {
     pub database_sessions: usize,
     pub indexed_sessions: usize,
     pub elapsed_ms: u128,
+    pub body_read_ms: f64,
+    pub metadata_read_ms: f64,
+    pub cache_read_ms: f64,
+    pub other_ms: f64,
+}
+
+impl Stats {
+    pub(crate) fn finish(&mut self, start: std::time::Instant) {
+        let elapsed = start.elapsed();
+        self.elapsed_ms = elapsed.as_millis();
+        self.other_ms = (elapsed.as_secs_f64() * 1000.0
+            - self.body_read_ms
+            - self.metadata_read_ms
+            - self.cache_read_ms)
+            .max(0.0);
+    }
 }
 
 #[derive(Clone, Debug, Serialize)]
