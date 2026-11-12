@@ -37,11 +37,35 @@ mod cipher {
     use std::io::{Seek, SeekFrom};
     use zeroize::Zeroizing;
 
-    // LC_UUID of the verified arm64 library shipped in TRAE CN 3.4.15.
-    // Offsets are used only after this exact build guard succeeds.
-    const UUID: [u8; 16] = [
-        0xb4, 0x4c, 0x0b, 0xfc, 0x90, 0xb7, 0x35, 0x66, 0x84, 0x72, 0x82, 0x7d, 0x16, 0x05, 0x71,
-        0xa2,
+    struct Layout {
+        uuid: [u8; 16],
+        input: u64,
+        masks: &'static [(u64, usize)],
+        salt: u64,
+    }
+
+    // Offsets are used only after the exact arm64 Mach-O build guard succeeds.
+    const LAYOUTS: &[Layout] = &[
+        Layout {
+            // TRAE CN 3.4.15.
+            uuid: [
+                0xb4, 0x4c, 0x0b, 0xfc, 0x90, 0xb7, 0x35, 0x66, 0x84, 0x72, 0x82, 0x7d, 0x16, 0x05,
+                0x71, 0xa2,
+            ],
+            input: 0x6b29073,
+            masks: &[(0x6b29020, 4), (0x6b29030, 3), (0x6cbe038, 8)],
+            salt: 0x99c711e,
+        },
+        Layout {
+            // TRAE CN 3.4.18 uses the input directly, without XOR masks.
+            uuid: [
+                0x33, 0x61, 0x69, 0x46, 0x6d, 0xeb, 0x35, 0x85, 0x8c, 0x32, 0xda, 0x6a, 0x42, 0xe2,
+                0x44, 0x51,
+            ],
+            input: 0x6df1714,
+            masks: &[],
+            salt: 0x9ad062e,
+        },
     ];
 
     fn read_at<const N: usize>(file: &mut fs::File, offset: u64) -> Result<Zeroizing<[u8; N]>> {
@@ -61,7 +85,7 @@ mod cipher {
         let count = u32::from_le_bytes(header[16..20].try_into()?);
         ensure!(count < 1024, "Invalid TRAE native library header");
         let mut offset = 32;
-        let mut supported = false;
+        let mut layout = None;
         for _ in 0..count {
             let command = read_at::<8>(&mut file, offset)?;
             let kind = u32::from_le_bytes(command[..4].try_into()?);
@@ -71,22 +95,22 @@ mod cipher {
                 "Invalid TRAE native library load command"
             );
             if kind == 0x1b && size == 24 {
-                supported = *read_at::<16>(&mut file, offset + 8)? == UUID;
+                let uuid = read_at::<16>(&mut file, offset + 8)?;
+                layout = LAYOUTS.iter().find(|layout| layout.uuid == *uuid);
             }
             offset += size;
         }
-        ensure!(
-            supported,
-            "Unsupported TRAE native library version; TRAE CN 3.4.15 arm64 is verified. Use --trae-index or --trae-ctx explicitly"
-        );
-        let mut input = read_at::<32>(&mut file, 0x6b29073)?;
-        for (offset, size) in [(0x6b29020, 4), (0x6b29030, 3), (0x6cbe038, 8)] {
+        let layout = layout.context(
+            "Unsupported TRAE native library version; TRAE CN 3.4.15 and 3.4.18 arm64 are verified. Use --trae-index or --trae-ctx explicitly",
+        )?;
+        let mut input = read_at::<32>(&mut file, layout.input)?;
+        for &(offset, size) in layout.masks {
             let mask = read_at::<8>(&mut file, offset)?;
             for (index, byte) in input.iter_mut().enumerate() {
                 *byte ^= mask[index % size];
             }
         }
-        let salt = read_at::<16>(&mut file, 0x99c711e)?;
+        let salt = read_at::<16>(&mut file, layout.salt)?;
         let mut material = Zeroizing::new([0u8; 32]);
         pbkdf2::pbkdf2_hmac::<Sha256>(input.as_ref(), salt.as_ref(), 100_000, material.as_mut());
         let mut key = Zeroizing::new(Vec::with_capacity(67));
@@ -967,6 +991,112 @@ mod tests {
         assert_eq!(pieces[0].id.as_deref(), Some("u"));
         assert_eq!(pieces[1].text, "可见进度");
         assert!(decode("task", r#"{"messages":[{"type":"new-unsupported-type"}]}"#).is_err());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn verified_native_builds_decrypt_synthetic_databases() {
+        use std::io::{Seek, SeekFrom, Write};
+
+        // Only synthetic material is placed in these sparse library fixtures.
+        // Encrypt independently with the unmasked input, so wrong offsets or
+        // retaining the old masks for the new build cannot pass the test.
+        let input = [0x5a; 32];
+        let salt = [0xa5; 16];
+        let mut material = [0u8; 32];
+        pbkdf2::pbkdf2_hmac::<Sha256>(&input, &salt, 100_000, &mut material);
+        let password = format!(
+            "x'{}'",
+            material
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>()
+        );
+        for (uuid, input_offset, salt_offset, masks) in [
+            (
+                "b44c0bfc90b735668472827d160571a2",
+                0x6b29073,
+                0x99c711e,
+                &[(0x6b29020, 4), (0x6b29030, 3), (0x6cbe038, 8)][..],
+            ),
+            (
+                "336169466deb35858c32da6a42e24451",
+                0x6df1714,
+                0x9ad062e,
+                &[][..],
+            ),
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            let library = root.path().join("synthetic.dylib");
+            let path = root.path().join("encrypted.db");
+            let mut file = fs::File::create(&library).unwrap();
+            let mut header = [0u8; 56];
+            header[..4].copy_from_slice(&[0xcf, 0xfa, 0xed, 0xfe]);
+            header[4..8].copy_from_slice(&0x0100000cu32.to_le_bytes());
+            header[16..20].copy_from_slice(&1u32.to_le_bytes());
+            header[20..24].copy_from_slice(&24u32.to_le_bytes());
+            header[32..36].copy_from_slice(&0x1bu32.to_le_bytes());
+            header[36..40].copy_from_slice(&24u32.to_le_bytes());
+            for (i, pair) in uuid.as_bytes().chunks_exact(2).enumerate() {
+                header[40 + i] =
+                    u8::from_str_radix(std::str::from_utf8(pair).unwrap(), 16).unwrap();
+            }
+            file.write_all(&header).unwrap();
+            if masks.is_empty() {
+                // Nonzero obsolete masks detect accidental reuse in 3.4.18.
+                for offset in [0x6b29020, 0x6b29030, 0x6cbe038] {
+                    file.seek(SeekFrom::Start(offset)).unwrap();
+                    file.write_all(&[0x31; 8]).unwrap();
+                }
+            }
+            let mut masked_input = input;
+            for &(offset, size) in masks {
+                let mask = [1, 3, 5, 7, 9, 11, 13, 15];
+                file.seek(SeekFrom::Start(offset)).unwrap();
+                file.write_all(&mask).unwrap();
+                for (i, byte) in masked_input.iter_mut().enumerate() {
+                    *byte ^= mask[i % size];
+                }
+            }
+            file.seek(SeekFrom::Start(input_offset)).unwrap();
+            file.write_all(&masked_input).unwrap();
+            file.seek(SeekFrom::Start(salt_offset)).unwrap();
+            file.write_all(&salt).unwrap();
+            let _writer = fixture(&path, Some(password.as_bytes()));
+            let before = fs::read(&path).unwrap();
+            let conn = open_readonly(&path, &library).unwrap();
+            let store = Store::from_connection(
+                conn,
+                &path,
+                &Options {
+                    no_cache: true,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            let parsed = store.show(ID).unwrap();
+            assert_eq!(parsed.session.title, "原生标题适配原因");
+            assert!(
+                parsed
+                    .messages
+                    .iter()
+                    .any(|message| message.text == "assistant-only-answer")
+            );
+            assert!(store.conn.execute("DELETE FROM chat_session", []).is_err());
+            assert_eq!(fs::read(&path).unwrap(), before);
+            // A matching UUID must not make incomplete material acceptable.
+            file.set_len(salt_offset + 15).unwrap();
+            assert!(cipher::key(&library).is_err());
+            // Likewise, a nearby unverified build must remain unsupported.
+            file.seek(SeekFrom::Start(40)).unwrap();
+            file.write_all(&[0xff; 16]).unwrap();
+            assert!(
+                cipher::key(&library)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("Unsupported")
+            );
+        }
     }
 
     #[cfg(target_os = "macos")]

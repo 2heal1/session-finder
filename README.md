@@ -24,7 +24,7 @@ Measured on Linux x64 with **1,200 synthetic Codex sessions across 24 projects**
 | Agent | Provider | Support |
 | --- | --- | --- |
 | **Codex** | `codex` | Local and archived conversations, full-text search, projects, fork and subagent relationships |
-| **TRAE IDE** | `trae` | Local database search, titles, projects, and conversation export; native access verified with **TRAE CN 3.4.15 on macOS arm64** |
+| **TRAE IDE** | `trae` | Local database search, titles, projects, and conversation export; native access verified with **TRAE CN 3.4.15 and 3.4.18 on macOS arm64** |
 | **TRAE CLI** | `traecli` | Local and archived conversations, full-text search, projects, and visible history after rollbacks |
 
 Searches include all three by default. Use `--provider codex`, `--provider trae`, or `--provider traecli` to select one. Relationship discovery currently supports Codex only. TRAE IDE also supports compatible offline exports and ContextFS snapshots; see the [TRAE IDE guide](docs/trae.md) for version and source limitations.

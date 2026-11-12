@@ -1,6 +1,6 @@
 # TRAE IDE integration
 
-TRAE IDE uses `--provider trae`; the separate [TRAE CLI provider](traecli.md) uses `traecli`. Native database access is currently verified with **TRAE CN 3.4.15 on macOS arm64**. Other native library builds are rejected explicitly rather than interpreted with an unverified layout.
+TRAE IDE uses `--provider trae`; the separate [TRAE CLI provider](traecli.md) uses `traecli`. Native database access is currently verified with **TRAE CN 3.4.15 and 3.4.18 on macOS arm64**. Other native library builds are rejected explicitly rather than interpreted with an unverified layout.
 
 ## Usage and source selection
 
@@ -96,7 +96,7 @@ All providers use the shared matcher, including English typo tolerance and bound
 
 `src/trae_db.rs` opens the database with `SQLITE_OPEN_READ_ONLY`, `query_only`, and a read transaction. Reads include live WAL data; `immutable=1`, which can ignore WAL changes, is not used. The adapter does not start the IDE, Node.js, or a background process.
 
-For the supported encrypted build, it first verifies the installed `libai_agent.dylib` Mach-O build UUID, then derives SQLCipher parameters in memory using that verified layout. Temporary material is cleared with `Zeroizing`. Keys are not stored in source, cache identities, snapshots, or errors. Unsupported builds fail explicitly. Non-macOS builds can still use compatible plaintext database exports and snapshots; this does not imply native access to arbitrary installed TRAE versions.
+For supported encrypted builds, it first verifies the installed `libai_agent.dylib` Mach-O build UUID, then derives SQLCipher parameters in memory using that build's verified layout. TRAE CN 3.4.18 changed the material offsets and removed the input masking used in 3.4.15. Temporary material is cleared with `Zeroizing`. Keys are not stored in source, cache identities, snapshots, or errors. Unsupported builds fail explicitly. Non-macOS builds can still use compatible plaintext database exports and snapshots; this does not imply native access to arbitrary installed TRAE versions.
 
 Conversion reads `chat_session`, project/session-project/worktree metadata, `chat_message`, and the corresponding body tables. It includes undeleted history, including messages preceding conversation compaction, and excludes deleted sessions/messages.
 
